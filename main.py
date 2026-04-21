@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -58,8 +59,6 @@ class MainWindow(QWidget):
         self.setObjectName("centralRoot")
         self._total_path: str | None = None
         self._banks: list[BankOption] = []
-        self._lbl_strict_val: QLabel | None = None
-        self._lbl_month_val: QLabel | None = None
         self._setup_ui()
         self._apply_styles()
         self._refresh_bank_combo()
@@ -77,14 +76,18 @@ class MainWindow(QWidget):
         return w
 
     @staticmethod
-    def _lbl_yuan_purple() -> QLabel:
-        w = QLabel("元")
-        w.setObjectName("summaryPurple")
-        return w
+    def _right_align_cell(width_px: int, widget: QWidget) -> QWidget:
+        cell = QWidget()
+        h = QHBoxLayout(cell)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addStretch(1)
+        h.addWidget(widget)
+        cell.setFixedWidth(width_px)
+        return cell
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("智能排款")
-        self.setMinimumSize(560, 600)
+        self.setMinimumSize(1120, 600)
         self.setWindowIcon(_load_window_icon())
 
         m = Figma
@@ -151,37 +154,44 @@ class MainWindow(QWidget):
         micro.setObjectName("figmaMicroTitle")
         root.addWidget(micro)
 
-        # —— 银行选择 + 付款方式（同一行）——
-        row_bank_pay = QHBoxLayout()
-        row_bank_pay.setSpacing(m.GAP_INLINE)
-        row_bank_pay.addWidget(self._lbl_purple("银 行 选 择："))
+        # —— 银行/付款方式 + 可支付金额/确定（栅格：第 3 列与付款方式下拉同宽，确定右缘对齐）——
+        va = Qt.AlignmentFlag.AlignVCenter
+        ra = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
+        pair = QWidget()
+        grid = QGridLayout(pair)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(m.GAP_INLINE)
+        grid.setVerticalSpacing(12)
+        grid.setColumnMinimumWidth(1, m.W_COMBO_BANK)
+        grid.setColumnMinimumWidth(3, m.W_COMBO_PAY_METHOD)
+        grid.setColumnStretch(4, 1)
+
+        grid.addWidget(self._lbl_purple("银 行 选 择："), 0, 0, ra)
         self.combo_bank = QComboBox()
         self.combo_bank.setObjectName("figmaCombo")
-        self.combo_bank.setMinimumHeight(40)
-        self.combo_bank.setMinimumWidth(200)
+        self.combo_bank.setFixedSize(m.W_COMBO_BANK, 40)
         self.combo_bank.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
-        row_bank_pay.addWidget(self.combo_bank, 1)
-        row_bank_pay.addWidget(self._lbl_purple("付款方式："))
+        grid.addWidget(self.combo_bank, 0, 1, va)
+        grid.addWidget(self._lbl_purple("付款方式："), 0, 2, ra)
         self.combo_pay_method = QComboBox()
         self.combo_pay_method.setObjectName("figmaCombo")
-        self.combo_pay_method.setMinimumHeight(40)
-        self.combo_pay_method.setMinimumWidth(180)
         for s in ("不限", "电汇", "支票", "承兑汇票", "现金"):
             self.combo_pay_method.addItem(s)
         self.combo_pay_method.setCurrentIndex(0)
+        self.combo_pay_method.setFixedSize(m.W_COMBO_PAY_METHOD, 40)
         self.combo_pay_method.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
-        row_bank_pay.addWidget(self.combo_pay_method, 1)
-        row_bank_pay.addStretch(1)
-        root.addLayout(row_bank_pay)
+        grid.addWidget(self.combo_pay_method, 0, 3, va)
 
-        # —— 可支付金额 + 元 + 确定 ——
-        row_amt = QHBoxLayout()
-        row_amt.setSpacing(m.GAP_TIGHT)
-        row_amt.addWidget(self._lbl_purple("可支付金额："))
+        w_amt = QWidget()
+        lay_amt = QHBoxLayout(w_amt)
+        lay_amt.setContentsMargins(0, 0, 0, 0)
+        lay_amt.setSpacing(m.GAP_TIGHT)
+        lay_amt.addWidget(self._lbl_purple("可支付金额："))
         self.edit_amount = QLineEdit()
         self.edit_amount.setObjectName("figmaInput")
         self.edit_amount.setPlaceholderText("")
@@ -192,17 +202,22 @@ class MainWindow(QWidget):
         self.edit_amount.setSizePolicy(
             QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
         )
-        row_amt.addWidget(self.edit_amount, 0)
-        row_amt.addWidget(self._lbl_yuan_blue())
-        row_amt.addStretch(1)
+        lay_amt.addWidget(self.edit_amount)
+        lay_amt.addWidget(self._lbl_yuan_blue())
+        lay_amt.addStretch(1)
+        grid.addWidget(w_amt, 1, 0, 1, 3, va)
+
         self.btn_confirm = QPushButton("确定")
         self.btn_confirm.setObjectName("figmaBlueSmall")
         self.btn_confirm.setMinimumHeight(44)
         self.btn_confirm.clicked.connect(self._on_confirm)
-        row_amt.addWidget(self.btn_confirm, 0, Qt.AlignmentFlag.AlignRight)
-        root.addLayout(row_amt)
+        grid.addWidget(
+            self._right_align_cell(m.W_COMBO_PAY_METHOD, self.btn_confirm), 1, 3, va
+        )
 
-        # —— 底部：左侧「智能排款」，右侧两行汇总 ——
+        root.addWidget(pair)
+
+        # —— 底部：「智能排款」——
         bottom = QHBoxLayout()
         bottom.setSpacing(28)
         bottom.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -216,36 +231,7 @@ class MainWindow(QWidget):
         )
         self.btn_smart.clicked.connect(self._on_smart_placeholder)
         bottom.addWidget(self.btn_smart, 0, Qt.AlignmentFlag.AlignTop)
-
-        col_sum = QVBoxLayout()
-        col_sum.setSpacing(14)
-
-        r1 = QHBoxLayout()
-        r1.addWidget(self._lbl_purple("严格按账期支付金额："))
-        r1.addStretch(1)
-        self._lbl_strict_val = QLabel("—")
-        self._lbl_strict_val.setObjectName("summaryValue")
-        self._lbl_strict_val.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        r1.addWidget(self._lbl_strict_val)
-        r1.addWidget(self._lbl_yuan_purple())
-        col_sum.addLayout(r1)
-
-        r2 = QHBoxLayout()
-        r2.addWidget(self._lbl_purple("本月应付款金额："))
-        r2.addStretch(1)
-        self._lbl_month_val = QLabel("—")
-        self._lbl_month_val.setObjectName("summaryValue")
-        self._lbl_month_val.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        r2.addWidget(self._lbl_month_val)
-        r2.addWidget(self._lbl_yuan_purple())
-        col_sum.addLayout(r2)
-
-        col_sum.addStretch(1)
-        bottom.addLayout(col_sum, 1)
+        bottom.addStretch(1)
         root.addLayout(bottom)
 
         root.addStretch(1)
@@ -376,8 +362,7 @@ class MainWindow(QWidget):
         QMessageBox.information(
             self,
             "智能排款",
-            "智能排款功能将在后续版本中提供，当前为预留入口。\n"
-            "届时将在此更新「严格按账期支付金额」「本月应付款金额」等汇总。",
+            "智能排款功能将在后续版本中提供，当前为预留入口。",
         )
 
 

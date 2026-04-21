@@ -58,6 +58,10 @@ class Figma:
     # 与「可支付总额」同宽的短输入框：总额、百分比、银行区「可支付金额」三处共用（像素可调）
     W_INPUT_SHORT_MAX = 200
 
+    # 银行 / 付款方式 下拉宽度（相对原先 min 200、180 各为 2 倍）
+    W_COMBO_BANK = 400
+    W_COMBO_PAY_METHOD = 360
+
 
 def build_app_stylesheet() -> str:
     t = Figma
