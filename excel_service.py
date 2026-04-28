@@ -6,7 +6,8 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from datetime import date, datetime
+from typing import Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
@@ -16,6 +17,23 @@ import xlrd
 
 
 EXCEL_FILTER = "Excel (*.xlsx *.xls);;Excel 2007+ (*.xlsx);;Excel 97-2003 (*.xls)"
+
+# 首表（Sheet1）横向摘要行：五个表头词须同现一行，再各自向右取到首个空单元格
+SHEET1_SUMMARY_LABELS: Tuple[str, ...] = (
+    "银行名称",
+    "排款总额",
+    "放款日期",
+    "可支付的主体",
+    "付款方式",
+)
+
+
+@dataclass(frozen=True)
+class Sheet1SummaryStripResult:
+    """首表命中行及每个表头右侧连续非空单元格（遇空或遇下一表头词则停）。"""
+
+    row_1based: Optional[int]
+    columns: Dict[str, Tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -173,6 +191,134 @@ def read_banks(path: str) -> Tuple[List[BankOption], str]:
     if _is_xls(path):
         return read_banks_from_xls(path)
     return read_banks_from_xlsx(path)
+
+
+def _cell_text_normalized(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S").strip()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value).strip()
+
+
+def _collect_strip_openpyxl(
+    ws: Worksheet,
+    row_1based: int,
+    label_col: int,
+    label_values: frozenset[str],
+) -> List[str]:
+    out: List[str] = []
+    max_c = ws.max_column or 0
+    c = label_col + 1
+    while c <= max_c:
+        t = _cell_text_normalized(ws.cell(row=row_1based, column=c).value)
+        if not t:
+            break
+        if t in label_values:
+            break
+        out.append(t)
+        c += 1
+    return out
+
+
+def read_sheet1_summary_strip_xlsx(path: str) -> Sheet1SummaryStripResult:
+    wb = load_workbook(path, read_only=False, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        labels = SHEET1_SUMMARY_LABELS
+        label_froze = frozenset(labels)
+        max_scan_r = min(ws.max_row or 0, 500)
+        max_c = ws.max_column or 0
+        best_row: Optional[int] = None
+        best_cols: Dict[str, int] = {}
+        for r in range(1, max_scan_r + 1):
+            cols_by_label: Dict[str, int] = {}
+            for c in range(1, max_c + 1):
+                t = _cell_text_normalized(ws.cell(row=r, column=c).value)
+                if t in labels and t not in cols_by_label:
+                    cols_by_label[t] = c
+            if len(cols_by_label) == len(labels):
+                best_row = r
+                best_cols = cols_by_label
+                break
+        if best_row is None:
+            return Sheet1SummaryStripResult(row_1based=None, columns={lb: () for lb in labels})
+        cols_data: Dict[str, Tuple[str, ...]] = {}
+        for lb in labels:
+            cols_data[lb] = tuple(
+                _collect_strip_openpyxl(ws, best_row, best_cols[lb], label_froze)
+            )
+        return Sheet1SummaryStripResult(row_1based=best_row, columns=cols_data)
+    finally:
+        wb.close()
+
+
+def read_sheet1_summary_strip_xls(path: str) -> Sheet1SummaryStripResult:
+    book = xlrd.open_workbook(path)
+    sh = book.sheet_by_index(0)
+    labels = SHEET1_SUMMARY_LABELS
+    label_froze = frozenset(labels)
+    max_scan_r = min(sh.nrows, 500)
+    max_c = sh.ncols
+
+    def cell_str(r: int, c0: int) -> str:
+        try:
+            v = sh.cell_value(r, c0)
+        except IndexError:
+            return ""
+        if v == "" or v is None:
+            return ""
+        tp = sh.cell_type(r, c0)
+        if tp == xlrd.XL_CELL_DATE:
+            try:
+                y, mo, d, h, mi, s = xlrd.xldate_as_tuple(v, book.datemode)
+                if h == 0 and mi == 0 and s == 0:
+                    return f"{y:04d}-{mo:02d}-{d:02d}"
+                return f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:{s:02d}"
+            except Exception:
+                return str(v).strip()
+        return str(v).strip()
+
+    best_r0: Optional[int] = None
+    best_cols_1based: Dict[str, int] = {}
+    for r in range(max_scan_r):
+        cols_by_label: Dict[str, int] = {}
+        for c0 in range(max_c):
+            t = cell_str(r, c0)
+            if t in labels and t not in cols_by_label:
+                cols_by_label[t] = c0 + 1
+        if len(cols_by_label) == len(labels):
+            best_r0 = r
+            best_cols_1based = cols_by_label
+            break
+
+    if best_r0 is None:
+        return Sheet1SummaryStripResult(row_1based=None, columns={lb: () for lb in labels})
+
+    cols_data: Dict[str, Tuple[str, ...]] = {}
+    for lb in labels:
+        c1 = best_cols_1based[lb]
+        out: List[str] = []
+        c = c1 + 1
+        while c <= max_c:
+            t = cell_str(best_r0, c - 1)
+            if not t:
+                break
+            if t in label_froze:
+                break
+            out.append(t)
+            c += 1
+        cols_data[lb] = tuple(out)
+    return Sheet1SummaryStripResult(row_1based=best_r0 + 1, columns=cols_data)
+
+
+def read_sheet1_summary_strip(path: str) -> Sheet1SummaryStripResult:
+    """读取首表 Sheet1 上同时含五个关键词的一行，并横向截取各词右侧直到空的片段。"""
+    if _is_xls(path):
+        return read_sheet1_summary_strip_xls(path)
+    return read_sheet1_summary_strip_xlsx(path)
 
 
 def _ensure_amount_method_cols(ws: Worksheet, header_row: int, colmap: dict) -> dict:

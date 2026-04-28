@@ -14,8 +14,17 @@ FIGMA_DESIGN_URL = (
 
 
 class Figma:
-    # 整页白底（稿面为纯白）
+    # 整页画布（卡片外区域略灰，突出白卡片）
+    BG_CANVAS = "#EEF1F6"
+    # 卡片表面
+    BG_CARD = "#FFFFFF"
+    # 兼容旧名：控件默认仍可用白底
     BG_PAGE = "#FFFFFF"
+
+    CARD_BORDER = "#DDE3EB"
+    CARD_RADIUS = 12
+    CARD_PAD_H = 22
+    CARD_PAD_V = 20
 
     # 标签 / 说明
     LABEL_PURPLE = "#722ED1"
@@ -67,12 +76,17 @@ def build_app_stylesheet() -> str:
     t = Figma
     return f"""
     QWidget {{
-        background-color: {t.BG_PAGE};
         color: #262626;
         font-size: {t.BODY_PT}px;
     }}
     QWidget#centralRoot {{
-        background-color: {t.BG_PAGE};
+        background-color: {t.BG_CANVAS};
+    }}
+
+    QFrame#elevatedCard {{
+        background-color: {t.BG_CARD};
+        border: 1px solid {t.CARD_BORDER};
+        border-radius: {t.CARD_RADIUS}px;
     }}
 
     QLabel#figmaPurpleLabel {{
