@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Figma「智能排款界面」设计令牌（与 Dev Mode 色值不一致时可在此微调）。
-
-https://www.figma.com/design/aabHTb8OZnSlJBQPKrNhrZ/%E6%99%BA%E8%83%BD%E6%8E%92%E6%AC%BE%E7%95%8C%E9%9D%A2?node-id=0-1
+设计令牌与 QSS：与项目内 figma-smart-payment-ui.html 对齐。
 """
 
 from __future__ import annotations
@@ -14,60 +12,57 @@ FIGMA_DESIGN_URL = (
 
 
 class Figma:
-    # 整页画布（卡片外区域略灰，突出白卡片）
-    BG_CANVAS = "#EEF1F6"
-    # 卡片表面
+    BG_CANVAS = "#FFFFFF"
     BG_CARD = "#FFFFFF"
-    # 兼容旧名：控件默认仍可用白底
     BG_PAGE = "#FFFFFF"
 
-    CARD_BORDER = "#DDE3EB"
-    CARD_RADIUS = 12
-    CARD_PAD_H = 22
-    CARD_PAD_V = 20
+    CARD_BORDER = "#E8E8E8"
+    CARD_RADIUS = 8
+    CARD_PAD_H = 16
+    CARD_PAD_V = 16
 
-    # 标签 / 说明
     LABEL_PURPLE = "#722ED1"
     SECTION_MICRO = "#9254DE"
     TEXT_MUTED = "#8C8C8C"
 
-    # 单位与强调（稿中为蓝色「元」）
-    SUFFIX_BLUE = "#1890FF"
+    SUFFIX_UNIT = "#1890FF"
 
-    # 输入框：浅青描边
-    BORDER_INPUT = "#13C2C2"
-    BORDER_INPUT_FOCUS = "#08979C"
+    BORDER_INPUT = "#1890FF"
+    BORDER_INPUT_FOCUS = "#40A9FF"
     BG_INPUT = "#FFFFFF"
     BG_COMBO = "#F5F5F5"
 
-    # 主按钮（亮蓝）
-    PRIMARY = "#1890FF"
-    PRIMARY_HOVER = "#40A9FF"
-    PRIMARY_PRESSED = "#096DD9"
-    TEXT_ON_PRIMARY = "#FFFFFF"
+    PRIMARY = "#1677FF"
 
     RADIUS_INPUT = 4
     RADIUS_BUTTON = 4
-    RADIUS_HERO = 6
 
-    PAGE_MARGIN_H = 28
-    PAGE_MARGIN_V = 24
-    GAP_SECTION = 20
+    PAGE_MARGIN_H = 20
+    PAGE_MARGIN_V = 20
+    GAP_SECTION = 24
     GAP_INLINE = 12
     GAP_TIGHT = 8
 
-    BODY_PT = 14
+    ROW_GAP = 16
+    DATA_ROW_GAP = 60
+    DATA_LABEL_TO_YUAN = 120
+
+    BODY_PT = 16
+    UPLOAD_BTN_PT = BODY_PT + 2
+    LABEL_PT = 18
+    ACTION_BTN_PT = 20
     MICRO_PT = 12
-    HERO_PT = 18
 
-    # 表单紫字标签 / 小节标题（相对正文为 2 倍字号，对应稿图框选区域）
-    LABEL_PURPLE_PX = BODY_PT * 1.5
-    SECTION_MICRO_PX = MICRO_PT * 1.5
+    LABEL_PURPLE_PX = LABEL_PT
+    SECTION_TITLE_PT = LABEL_PT
 
-    # 与「可支付总额」同宽的短输入框：总额、百分比、银行区「可支付金额」三处共用（像素可调）
-    W_INPUT_SHORT_MAX = 200
+    W_PCT_INPUT = 100
+    # 百分比行「输入框 + 间距 + %」占位宽度，总额行「元」同列右对齐
+    W_PCT_SUFFIX_SLOT = 18
+    W_PCT_TAIL = W_PCT_INPUT + GAP_TIGHT + W_PCT_SUFFIX_SLOT
+    W_INPUT_SHORT_MAX = 100
+    W_AMOUNT_INPUT = 200
 
-    # 银行 / 付款方式 下拉宽度（相对原先 min 200、180 各为 2 倍）
     W_COMBO_BANK = 400
     W_COMBO_PAY_METHOD = 360
 
@@ -93,15 +88,18 @@ def build_app_stylesheet() -> str:
         color: {t.LABEL_PURPLE};
         font-size: {t.LABEL_PURPLE_PX}px;
     }}
+    QLabel#figmaSectionTitle {{
+        color: {t.LABEL_PURPLE};
+        font-size: {t.SECTION_TITLE_PT}px;
+    }}
     QLabel#figmaMicroTitle {{
         color: {t.SECTION_MICRO};
-        font-size: {t.SECTION_MICRO_PX}px;
+        font-size: {t.MICRO_PT * 1.5}px;
         font-weight: 500;
     }}
-    QLabel#suffixYuan {{
-        color: {t.SUFFIX_BLUE};
-        font-size: {t.BODY_PT}px;
-        font-weight: 500;
+    QLabel#suffixYuan, QLabel#suffixUnit {{
+        color: {t.SUFFIX_UNIT};
+        font-size: {t.LABEL_PT}px;
     }}
     QLabel#summaryPurple {{
         color: {t.LABEL_PURPLE};
@@ -109,8 +107,8 @@ def build_app_stylesheet() -> str:
     }}
     QLabel#summaryValue {{
         color: {t.LABEL_PURPLE};
-        font-size: {t.BODY_PT}px;
-        font-weight: 600;
+        font-size: {t.BODY_PT + 1}px;
+        font-weight: 700;
         min-width: 2em;
     }}
     QLabel#footerHint {{
@@ -122,9 +120,11 @@ def build_app_stylesheet() -> str:
         background: {t.BG_INPUT};
         border: 1px solid {t.BORDER_INPUT};
         border-radius: {t.RADIUS_INPUT}px;
-        padding: 8px 12px;
-        min-height: 22px;
+        padding: 0 6px;
+        min-height: 30px;
+        max-height: 32px;
         color: #262626;
+        font-size: {t.BODY_PT}px;
     }}
     QLineEdit#figmaInput:focus {{
         border: 1px solid {t.BORDER_INPUT_FOCUS};
@@ -149,56 +149,59 @@ def build_app_stylesheet() -> str:
         background: {t.BG_COMBO};
         border: 1px solid #D9D9D9;
         selection-background-color: {t.PRIMARY};
-        selection-color: {t.TEXT_ON_PRIMARY};
+        selection-color: #FFFFFF;
         outline: none;
+    }}
+
+    QPushButton#figmaUploadBtn {{
+        background-color: {t.PRIMARY};
+        color: #FFFFFF;
+        border: none;
+        border-radius: {t.RADIUS_BUTTON}px;
+        padding: 9px 17px;
+        font-size: {t.UPLOAD_BTN_PT}px;
+        min-height: 22px;
+    }}
+
+    QPushButton#figmaActionBtn {{
+        background-color: {t.PRIMARY};
+        color: #FFFFFF;
+        border: none;
+        border-radius: {t.RADIUS_BUTTON}px;
+        padding: 18px 24px;
+        font-size: {t.ACTION_BTN_PT}px;
+        min-height: 22px;
     }}
 
     QPushButton#figmaBlue {{
         background-color: {t.PRIMARY};
-        color: {t.TEXT_ON_PRIMARY};
+        color: #FFFFFF;
         border: none;
         border-radius: {t.RADIUS_BUTTON}px;
-        padding: 8px 20px;
+        padding: 9px 17px;
+        font-size: {t.BODY_PT}px;
         font-weight: 600;
-        min-height: 24px;
-    }}
-    QPushButton#figmaBlue:hover {{
-        background-color: {t.PRIMARY_HOVER};
-    }}
-    QPushButton#figmaBlue:pressed {{
-        background-color: {t.PRIMARY_PRESSED};
+        min-height: 22px;
     }}
 
     QPushButton#figmaBlueSmall {{
         background-color: {t.PRIMARY};
-        color: {t.TEXT_ON_PRIMARY};
+        color: #FFFFFF;
         border: none;
         border-radius: {t.RADIUS_BUTTON}px;
         padding: 6px 22px;
         font-weight: 600;
         min-height: 22px;
     }}
-    QPushButton#figmaBlueSmall:hover {{
-        background-color: {t.PRIMARY_HOVER};
-    }}
-    QPushButton#figmaBlueSmall:pressed {{
-        background-color: {t.PRIMARY_PRESSED};
-    }}
 
     QPushButton#figmaHero {{
         background-color: {t.PRIMARY};
-        color: {t.TEXT_ON_PRIMARY};
+        color: #FFFFFF;
         border: none;
-        border-radius: {t.RADIUS_HERO}px;
+        border-radius: 6px;
         padding: 20px 32px;
         font-weight: 700;
-        font-size: {t.HERO_PT}px;
+        font-size: 18px;
         min-height: 36px;
-    }}
-    QPushButton#figmaHero:hover {{
-        background-color: {t.PRIMARY_HOVER};
-    }}
-    QPushButton#figmaHero:pressed {{
-        background-color: {t.PRIMARY_PRESSED};
     }}
     """

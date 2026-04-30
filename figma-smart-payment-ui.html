@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能排款界面</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        body {
+            background: #ffffff;
+            padding: 20px;
+        }
+        /* 卡片容器 */
+        .card {
+            border: 1px solid #e8e8e8;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        /* 按钮样式 */
+        .btn {
+            background: #1677ff;
+            color: #ffffff;
+            border: none;
+            padding: 18px 24px;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        /* 智能排款 + 查看排款 按钮文字增大2号 */
+        .action-right,
+        .card > .btn {
+            font-size: 20px;
+        }
+        /* 顶部两个上传按钮 高度减半 + 宽度减少15px */
+        .btn-group .btn {
+            padding: 9px 16.5px;
+            font-size: 16px; /* 上传按钮文字保持不变 */
+        }
+        .btn + .btn {
+            margin-left: 12px;
+        }
+        /* 行布局 */
+        .row {
+            display: flex;
+            align-items: center;
+            margin-top: 16px;
+        }
+        /* 标签文字 */
+        .label {
+            color: #722ed1;
+            font-size: 18px;
+        }
+        /* 单位文字 */
+        .unit {
+            color: #1890ff;
+            font-size: 18px;
+        }
+        /* 输入框组 */
+        .input-group {
+            display: flex;
+            align-items: center;
+        }
+        .pct-input {
+            width: 100px;
+            height: 32px;
+            border: 1px solid #1890ff;
+            border-radius: 4px;
+            padding: 0 6px;
+            margin-right: 8px;
+        }
+        /* 右侧按钮对齐 */
+        .action-right {
+            margin-left: auto;
+        }
+        /* 数据行布局 */
+        .section-title {
+            color: #722ed1;
+            font-size: 18px;
+            margin-top: 16px;
+            margin-bottom: 12px;
+        }
+        .data-row {
+            display: flex;
+            gap: 60px;
+            margin-top: 12px;
+        }
+        .data-cell {
+            display: flex;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        /* ===== 关键修正 ===== */
+        /* 1. 卡片1：「元」与「%」右侧对齐 */
+        .card1-unit-row {
+            display: flex;
+            align-items: center;
+            margin-top: 16px;
+        }
+        .card1-unit-row .label {
+            flex: none;
+        }
+        .card1-unit-row .spacer {
+            flex-grow: 1;
+            max-width: calc(100px + 8px);
+        }
+
+        /* 2. 卡片2：元 间距统一 */
+        .data-cell .unit {
+            margin-left: 120px;
+        }
+    </style>
+</head>
+<body>
+    <!-- 卡片1：上传与设置 -->
+    <div class="card">
+        <div class="btn-group">
+            <button class="btn">上传排款计划总表</button>
+            <button class="btn">上传排款明细模版</button>
+        </div>
+        <!-- 修正：元字和%右侧对齐 -->
+        <div class="card1-unit-row">
+            <span class="label">本月可支付总额：</span>
+            <div class="spacer"></div>
+            <span class="unit">元</span>
+        </div>
+        <div class="card1-unit-row">
+            <span class="label">本月预留款总额：</span>
+            <div class="spacer"></div>
+            <span class="unit">元</span>
+        </div>
+        <div class="row">
+            <div class="input-group">
+                <span class="label">第一优先级支付计划占应付额：</span>
+                <input type="text" class="pct-input">
+                <span class="unit">%</span>
+            </div>
+        </div>
+        <div class="row">
+            <div class="input-group">
+                <span class="label">第二优先级支付计划占应付额：</span>
+                <input type="text" class="pct-input">
+                <span class="unit">%</span>
+            </div>
+            <button class="btn action-right" style="margin-left: 278px;">智能排款</button>
+        </div>
+    </div>
+
+    <!-- 卡片2：查看排款 -->
+    <div class="card">
+        <button class="btn">查看排款</button>
+        <div class="section-title">严格按账期付款情况</div>
+        <div class="data-row">
+            <div class="data-cell">
+                <span class="label">成本二部：</span>
+                <span class="unit">元</span>
+            </div>
+            <div class="data-cell">
+                <span class="label">成本三部：</span>
+                <span class="unit">元</span>
+            </div>
+            <div class="data-cell">
+                <span class="label">合计：</span>
+                <span class="unit">元</span>
+            </div>
+        </div>
+        <div class="section-title">本月应付款总体情况</div>
+        <div class="data-row">
+            <div class="data-cell">
+                <span class="label">成本二部：</span>
+                <span class="unit">元</span>
+            </div>
+            <div class="data-cell">
+                <span class="label">成本三部：</span>
+                <span class="unit">元</span>
+            </div>
+            <div class="data-cell">
+                <span class="label">合计：</span>
+                <span class="unit">元</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

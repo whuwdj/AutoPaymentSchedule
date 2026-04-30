@@ -203,6 +203,130 @@ def _cell_text_normalized(value: object) -> str:
     return str(value).strip()
 
 
+def _norm_header_label(text: str) -> str:
+    return text.replace("：", "").replace(":", "").strip()
+
+
+def _coerce_numeric_for_sum(value: object) -> Optional[float]:
+    """将单元格值转为参与求和的 float；日期、布尔、不可解析文本返回 None。"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return None
+    s = str(value).strip().replace(",", "").replace("，", "").replace(" ", "")
+    if not s or s in ("-", "—"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _xls_cell_text_for_scan(book: xlrd.book.Book, sh: xlrd.sheet.Sheet, r0: int, c0: int) -> str:
+    try:
+        v = sh.cell_value(r0, c0)
+    except IndexError:
+        return ""
+    if v == "" or v is None:
+        return ""
+    tp = sh.cell_type(r0, c0)
+    if tp == xlrd.XL_CELL_DATE:
+        try:
+            y, mo, d, h, mi, s = xlrd.xldate_as_tuple(v, book.datemode)
+            if h == 0 and mi == 0 and s == 0:
+                return f"{y:04d}-{mo:02d}-{d:02d}"
+            return f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:{s:02d}"
+        except Exception:
+            return str(v).strip()
+    if tp == xlrd.XL_CELL_NUMBER and float(v).is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+
+def sum_sheet1_row_after_payout_gross_column(
+    path: str, row_1based: int
+) -> Optional[float]:
+    """
+    首表（Sheet1）指定行：定位「排款总额」所在列，将该列右侧所有可解析为数字的单元格求和。
+    未找到「排款总额」或行越界则返回 None。
+    """
+    if row_1based < 1:
+        return None
+    if _is_xls(path):
+        return _sum_sheet1_row_after_payout_gross_xls(path, row_1based)
+    return _sum_sheet1_row_after_payout_gross_xlsx(path, row_1based)
+
+
+def sum_sheet1_row2_after_payout_gross_column(path: str) -> Optional[float]:
+    """兼容：第 2 行。"""
+    return sum_sheet1_row_after_payout_gross_column(path, 2)
+
+
+def sum_sheet1_row4_after_payout_gross_column(path: str) -> Optional[float]:
+    """第 4 行：排款总额右侧数字格求和（上传总表后写入「本月可支付总额」）。"""
+    return sum_sheet1_row_after_payout_gross_column(path, 4)
+
+
+def _sum_sheet1_row_after_payout_gross_xlsx(path: str, row_1based: int) -> Optional[float]:
+    wb = load_workbook(path, read_only=False, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        max_c = ws.max_column or 0
+        start_c: Optional[int] = None
+        for c in range(1, max_c + 1):
+            t = _cell_text_normalized(ws.cell(row=row_1based, column=c).value)
+            if _norm_header_label(t) == "排款总额":
+                start_c = c
+                break
+        if start_c is None:
+            return None
+        total = 0.0
+        for c in range(start_c + 1, max_c + 1):
+            n = _coerce_numeric_for_sum(ws.cell(row=row_1based, column=c).value)
+            if n is not None:
+                total += n
+        return total
+    finally:
+        wb.close()
+
+
+def _sum_sheet1_row_after_payout_gross_xls(path: str, row_1based: int) -> Optional[float]:
+    book = xlrd.open_workbook(path)
+    sh = book.sheet_by_index(0)
+    r0 = row_1based - 1
+    if r0 < 0 or sh.nrows <= r0:
+        return None
+    start_c0: Optional[int] = None
+    for c0 in range(sh.ncols):
+        t = _xls_cell_text_for_scan(book, sh, r0, c0)
+        if _norm_header_label(t) == "排款总额":
+            start_c0 = c0
+            break
+    if start_c0 is None:
+        return None
+    total = 0.0
+    for c0 in range(start_c0 + 1, sh.ncols):
+        v = sh.cell_value(r0, c0)
+        tp = sh.cell_type(r0, c0)
+        if tp in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+            continue
+        if tp == xlrd.XL_CELL_DATE:
+            continue
+        if tp == xlrd.XL_CELL_NUMBER:
+            total += float(v)
+            continue
+        if tp == xlrd.XL_CELL_BOOLEAN:
+            continue
+        n = _coerce_numeric_for_sum(v)
+        if n is not None:
+            total += n
+    return total
+
+
 def _collect_strip_openpyxl(
     ws: Worksheet,
     row_1based: int,
