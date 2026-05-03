@@ -271,6 +271,105 @@ def sum_sheet1_row4_after_payout_gross_column(path: str) -> Optional[float]:
     return sum_sheet1_row_after_payout_gross_column(path, 4)
 
 
+def _find_sheet1_col_by_header_normalized(
+    ws: Worksheet, want: str, max_scan_r: int, max_scan_c: int
+) -> Optional[int]:
+    """在 Sheet1 前若干行/列中查找表头规范化后等于 want 的首个列号（1-based）。"""
+    want_n = _norm_header_label(want)
+    mr = min(max_scan_r, ws.max_row or 0)
+    mc = min(max_scan_c, ws.max_column or 0)
+    for r in range(1, mr + 1):
+        for c in range(1, mc + 1):
+            t = _norm_header_label(_cell_text_normalized(ws.cell(row=r, column=c).value))
+            if t == want_n:
+                return c
+    return None
+
+
+def _sum_sheet1_row4_through_total_scheduled_xlsx(path: str) -> Optional[float]:
+    """第 4 行：排款总额右侧起至「合计已排款」列（含）数字求和；找不到右边界时退化为整行右侧求和。"""
+    wb = load_workbook(path, read_only=False, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        max_c = ws.max_column or 0
+        if (ws.max_row or 0) < 4:
+            return None
+        start_c: Optional[int] = None
+        for c in range(1, max_c + 1):
+            t = _cell_text_normalized(ws.cell(row=4, column=c).value)
+            if _norm_header_label(t) == "排款总额":
+                start_c = c
+                break
+        if start_c is None:
+            return None
+        end_c = _find_sheet1_col_by_header_normalized(ws, "合计已排款", 50, 120)
+        if end_c is None or end_c <= start_c:
+            end_c = max_c
+        total = 0.0
+        for c in range(start_c + 1, end_c + 1):
+            n = _coerce_numeric_for_sum(ws.cell(row=4, column=c).value)
+            if n is not None:
+                total += n
+        return total
+    finally:
+        wb.close()
+
+
+def _sum_sheet1_row4_through_total_scheduled_xls(path: str) -> Optional[float]:
+    book = xlrd.open_workbook(path)
+    sh = book.sheet_by_index(0)
+    r0 = 3
+    if sh.nrows <= r0:
+        return None
+    start_c0: Optional[int] = None
+    end_c0: Optional[int] = None
+    max_r = min(sh.nrows, 50)
+    max_c = sh.ncols
+    for c0 in range(sh.ncols):
+        t = _xls_cell_text_for_scan(book, sh, r0, c0)
+        if _norm_header_label(t) == "排款总额":
+            start_c0 = c0
+            break
+    if start_c0 is None:
+        return None
+    for r in range(max_r):
+        for c0 in range(max_c):
+            t = _xls_cell_text_for_scan(book, sh, r, c0)
+            if _norm_header_label(t) == "合计已排款":
+                end_c0 = c0
+                break
+        if end_c0 is not None:
+            break
+    hi = end_c0 if (end_c0 is not None and end_c0 > start_c0) else sh.ncols - 1
+    total = 0.0
+    for c0 in range(start_c0 + 1, hi + 1):
+        v = sh.cell_value(r0, c0)
+        tp = sh.cell_type(r0, c0)
+        if tp in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+            continue
+        if tp == xlrd.XL_CELL_DATE:
+            continue
+        if tp == xlrd.XL_CELL_NUMBER:
+            total += float(v)
+            continue
+        if tp == xlrd.XL_CELL_BOOLEAN:
+            continue
+        n = _coerce_numeric_for_sum(v)
+        if n is not None:
+            total += n
+    return total
+
+
+def sum_sheet1_row4_after_payout_through_total_scheduled(path: str) -> Optional[float]:
+    """
+    第 4 行：从「排款总额」右侧第一个单元格起，至表头为「合计已排款」的列（含）为止连续格求和。
+    未找到「排款总额」则返回 None；未找到「合计已排款」则退化为该行剩余列求和。
+    """
+    if _is_xls(path):
+        return _sum_sheet1_row4_through_total_scheduled_xls(path)
+    return _sum_sheet1_row4_through_total_scheduled_xlsx(path)
+
+
 def _sum_sheet1_row_after_payout_gross_xlsx(path: str, row_1based: int) -> Optional[float]:
     wb = load_workbook(path, read_only=False, data_only=True)
     try:

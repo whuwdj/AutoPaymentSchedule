@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 智能排款：读取总表 Sheet1（程序目录 AutoPaymentScheduleFile/TotalSheet 下 Excel），
-仅处理「付款优先级 = 0」的数据行；账期汇总、三条件匹配排款列、写回金额并扣减第 5 行排款余额。
+初始化表后按付款优先级 0→1→2 依次处理；同档内再按 Sheet2「类别优先级」与 Sheet1「序号」排序，
+Sheet1 类别未在 Sheet2 出现的行排在同档末尾且顺序随机；尝试各「笔」列时仅调整遍历顺序（不改列位置）：
+按 Sheet3 银行应付款/付款优先级数值升序，未配置银行排最后；账期汇总、三条件匹配排款列、写回金额并扣减第 5 行排款余额。
 """
 
 from __future__ import annotations
 
+import math
+import random
 import re
+from collections import defaultdict
 from copy import copy
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -22,6 +27,7 @@ from excel_service import (
     _coerce_numeric_for_sum,
     _is_xls,
     _norm_header_label,
+    sum_sheet1_row4_after_payout_through_total_scheduled,
 )
 
 
@@ -29,9 +35,12 @@ from excel_service import (
 class SmartScheduleResult:
     path: str
     rows_priority0: int
+    rows_priority1: int
+    rows_priority2: int
     rows_scanned: int
     rows_written: int
     rows_skipped: int
+    reserved_total: Optional[float] = None
 
 
 def _norm_h(text: str) -> str:
@@ -116,6 +125,26 @@ def _find_payment_plan_col(ws: Worksheet, header_row: int) -> Optional[int]:
     return None
 
 
+def _sum_payment_plan_non_empty_numeric(
+    ws: Worksheet, header_row: int, c_payment_plan: int, max_r: int
+) -> float:
+    """表头行以下：付款计划列非空且可解析为数字的单元格求和。"""
+    total = 0.0
+    for r in range(header_row + 1, max_r + 1):
+        cell = ws.cell(row=r, column=c_payment_plan)
+        if isinstance(cell, MergedCell):
+            continue
+        v = cell.value
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        n = _coerce_numeric_for_sum(v)
+        if n is not None:
+            total += float(n)
+    return total
+
+
 def _find_invoice_balance_col(ws: Worksheet, header_row: int) -> Optional[int]:
     for c in range(1, (ws.max_column or 0) + 1):
         raw = ws.cell(row=header_row, column=c).value
@@ -142,6 +171,203 @@ def _find_total_scheduled_col(ws: Worksheet, header_row: int) -> Optional[int]:
         if h == "合计已排款":
             return c
     return None
+
+
+def _find_sheet2_category_header_cols(ws: Worksheet) -> Optional[Tuple[int, int, int]]:
+    """定位 Sheet2 上「类别」「类别优先级」所在表头行及列号（1-based）。"""
+    max_r = min(ws.max_row or 0, 15)
+    max_c = min(ws.max_column or 0, 80)
+    for r in range(1, max_r + 1):
+        c_cat: Optional[int] = None
+        c_pri: Optional[int] = None
+        for c in range(1, max_c + 1):
+            h = _norm_h(ws.cell(row=r, column=c).value)
+            if h == "类别":
+                c_cat = c
+            elif h == "类别优先级":
+                c_pri = c
+        if c_cat is not None and c_pri is not None:
+            return r, c_cat, c_pri
+    return None
+
+
+def _load_category_priority_map(
+    ws: Worksheet, header_row: int, c_cat: int, c_pri: int
+) -> Dict[str, float]:
+    """Sheet2：类别（与 Sheet1 同一套取值）→ 类别优先级；同一类别多行时取首次出现的优先级。"""
+    m: Dict[str, float] = {}
+    for r in range(header_row + 1, (ws.max_row or 0) + 1):
+        k = _cell_text_normalized(ws.cell(row=r, column=c_cat).value)
+        if not k:
+            continue
+        if k in m:
+            continue
+        pv = _coerce_numeric_for_sum(ws.cell(row=r, column=c_pri).value)
+        if pv is None:
+            continue
+        m[k] = float(pv)
+    return m
+
+
+def _sheet1_serial_sort_key(ws: Worksheet, r: int, c_serial: Optional[int]) -> int:
+    if c_serial is None:
+        return r
+    v = ws.cell(row=r, column=c_serial).value
+    if v is None:
+        return r
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return r
+
+
+def _order_candidates_by_category_within_priority(
+    ws: Worksheet,
+    base: List[Tuple[int, int]],
+    c_category: int,
+    c_serial: Optional[int],
+    cat_map: Dict[str, float],
+) -> List[Tuple[int, int]]:
+    """
+    保持付款优先级 0→1→2 分段；每段内：先按 Sheet2 类别优先级升序、再按 Sheet1 序号升序；
+    类别为空或不在 Sheet2 的行排在同段已匹配行之后，彼此之间随机顺序。
+    """
+    by_pl: Dict[int, List[Tuple[int, int, Optional[float], int]]] = defaultdict(list)
+    for r, pl in base:
+        cat_k = _cell_text_normalized(ws.cell(row=r, column=c_category).value)
+        pcat: Optional[float] = cat_map.get(cat_k) if cat_k else None
+        ser = _sheet1_serial_sort_key(ws, r, c_serial)
+        by_pl[pl].append((r, pl, pcat, ser))
+    out: List[Tuple[int, int]] = []
+    for pl in (0, 1, 2):
+        bucket = by_pl.get(pl, [])
+        matched = [t for t in bucket if t[2] is not None]
+        unmatched = [t for t in bucket if t[2] is None]
+        matched.sort(key=lambda t: (t[2], t[3], t[0]))
+        random.shuffle(unmatched)
+        for t in matched + unmatched:
+            out.append((t[0], t[1]))
+    return out
+
+
+def _find_sheet3_bank_priority_header_cols(ws: Worksheet) -> Optional[Tuple[int, int, int]]:
+    """定位 Sheet3 上「银行名称」与「应付款优先级」或「付款优先级」所在表头行及列号（1-based）。"""
+    max_r = min(ws.max_row or 0, 20)
+    max_c = min(ws.max_column or 0, 40)
+    for r in range(1, max_r + 1):
+        c_bank: Optional[int] = None
+        c_pri: Optional[int] = None
+        for c in range(1, max_c + 1):
+            h = _norm_h(ws.cell(row=r, column=c).value)
+            if h == "银行名称":
+                c_bank = c
+            elif h == "应付款优先级" or h == "付款优先级":
+                if c_pri is None:
+                    c_pri = c
+        if c_bank is not None and c_pri is not None:
+            return r, c_bank, c_pri
+    return None
+
+
+def _load_sheet3_bank_priority_map(
+    ws: Worksheet, header_row: int, c_bank: int, c_pri: int
+) -> Dict[str, float]:
+    """Sheet3：银行名称 → 优先级数值（越小越优先）；同名多行取首次。"""
+    m: Dict[str, float] = {}
+    for r in range(header_row + 1, (ws.max_row or 0) + 1):
+        k = _cell_text_normalized(ws.cell(row=r, column=c_bank).value)
+        if not k or k in m:
+            continue
+        pv = _coerce_numeric_for_sum(ws.cell(row=r, column=c_pri).value)
+        if pv is None:
+            continue
+        m[k] = float(pv)
+    return m
+
+
+def _payment_cols_sorted_by_sheet3_bank_priority(
+    ws: Worksheet,
+    bank_cols: List[int],
+    bank_pri_map: Dict[str, float],
+) -> List[int]:
+    """
+    仅调整内存中的列遍历顺序，不移动工作表上的列。
+    已配置银行按 Sheet3 优先级数值升序；未配置视为最低档，排在最后（同档按列号升序）。
+    列与 Sheet3 的对应关系：Sheet1 第 3 行该列的银行名称与 Sheet3「银行名称」一致（规范化后匹配）。
+    """
+    def sort_key(c: int) -> Tuple[int, float, int]:
+        nm = _cell_text_normalized(ws.cell(row=3, column=c).value)
+        if nm and nm in bank_pri_map:
+            return (0, bank_pri_map[nm], c)
+        return (1, 0.0, c)
+
+    return sorted(bank_cols, key=sort_key)
+
+
+def _sum_over_invoice_cutoff_window(
+    ws: Worksheet,
+    header_row: int,
+    r: int,
+    c_invoice: int,
+    c_cutoff: int,
+    min_month_threshold: float,
+) -> float:
+    """
+    对「当月已开票余额」列之后～「截止」列之前：表头月份桶 mn ≥ min_month_threshold 的单元格求和。
+    """
+    total = 0.0
+    for c in range(c_invoice + 1, c_cutoff):
+        mn = _month_bucket_n(ws.cell(row=header_row, column=c).value)
+        if mn is None:
+            continue
+        if float(mn) < min_month_threshold:
+            continue
+        num = _coerce_numeric_for_sum(ws.cell(row=r, column=c).value)
+        if num is not None:
+            total += num
+    return total
+
+
+def _compute_ntotal_for_priority(
+    ws: Worksheet,
+    header_row: int,
+    r: int,
+    c_invoice: int,
+    c_cutoff: int,
+    n_period: float,
+    priority_level: int,
+    priority1_plan_pct: float,
+    priority2_plan_pct: float,
+) -> float:
+    """
+    计算本行 nTotalSum（供排款列写入与余额扣减使用；调用方须在主循环原 nTotalSum 位置赋值）。
+
+    priority 0：nTotalSum = 区间内 mn ≥ nPeriodCount（协议账期换算）的数值和。
+    priority 1/2：从 mn ≥ ceil(nPeriodCount) 起算；nPeriod=(和/已开票余额)*100%，
+    与对应百分比比较，偏大则表头起始月份 +1 再算，直到 nPeriod≤阈值或无法再推进。
+    """
+    if priority_level == 0:
+        return _sum_over_invoice_cutoff_window(
+            ws, header_row, r, c_invoice, c_cutoff, n_period
+        )
+
+    inv = _coerce_numeric_for_sum(ws.cell(row=r, column=c_invoice).value)
+    if inv is None or inv <= 0:
+        return 0.0
+
+    thr = priority1_plan_pct if priority_level == 1 else priority2_plan_pct
+    start_month = int(math.ceil(n_period))
+    max_safety = 64
+    for _ in range(max_safety):
+        n_period_count1 = _sum_over_invoice_cutoff_window(
+            ws, header_row, r, c_invoice, c_cutoff, float(start_month)
+        )
+        n_period_pct = (n_period_count1 / float(inv)) * 100.0
+        if n_period_pct > thr:
+            start_month += 1
+            continue
+        return n_period_count1
+    return 0.0
 
 
 def _protocol_period_months(value: object) -> Optional[float]:
@@ -259,24 +485,38 @@ def _loan_deadline_ok(ws: Worksheet, pay_col: int, deadline_cell: object) -> boo
     return loan_dt <= due_dt
 
 
-def _is_priority_zero(value: object) -> bool:
-    """付款优先级 = 0（付款优先级 = 1、2 不进入本逻辑）。"""
+def _priority_level_0_2(value: object) -> Optional[int]:
+    """付款优先级为 0、1、2 时返回对应整数，否则 None。"""
     if value is None:
-        return False
+        return None
     if isinstance(value, bool):
-        return False
+        return None
     if isinstance(value, (int, float)):
         try:
-            return float(value) == 0.0
+            x = float(value)
         except (TypeError, ValueError):
-            return False
+            return None
+        if x == 0.0:
+            return 0
+        if x == 1.0:
+            return 1
+        if x == 2.0:
+            return 2
+        return None
     s = str(value).strip()
     if not s:
-        return False
+        return None
     try:
-        return float(s) == 0.0
+        x = float(s)
     except ValueError:
-        return False
+        return None
+    if x == 0.0:
+        return 0
+    if x == 1.0:
+        return 1
+    if x == 2.0:
+        return 2
+    return None
 
 
 def _find_row4_payout_gross_col(ws: Worksheet) -> Optional[int]:
@@ -364,9 +604,16 @@ def _prepare_sheet_three_steps(
         _copy_cell_as_is(src, dst)
 
 
-def run_smart_schedule_on_total_sheet(path: str) -> SmartScheduleResult:
+def run_smart_schedule_on_total_sheet(
+    path: str,
+    priority1_plan_pct: float,
+    priority2_plan_pct: float,
+) -> SmartScheduleResult:
     """
-    在排款计划总表 Sheet1 上执行智能排款：仅处理「付款优先级 = 0」的行。
+    在排款计划总表 Sheet1 上执行智能排款：表初始化后按优先级 0、1、2 顺序处理各行；
+    同档内按 Sheet2 类别优先级与 Sheet1 序号排序（类别未对照到的行在同档末尾随机顺序）；
+    匹配各「笔」列时按 Sheet3 银行优先级数值升序遍历列（仅处理顺序，不改表结构；未配置银行排最后）。
+    优先级 1、2 的应付占比阈值分别为 priority1_plan_pct、priority2_plan_pct（与界面输入一致，如 30 表示 30%）。
     仅支持 .xlsx。
     """
     if _is_xls(path):
@@ -389,6 +636,8 @@ def run_smart_schedule_on_total_sheet(path: str) -> SmartScheduleResult:
         c_priority = _find_col_header_contains(ws, header_row, "付款优先级")
         c_due = _find_col_by_exact(ws, header_row, "付款截止日期")
         c_payment_plan = _find_payment_plan_col(ws, header_row)
+        c_category = _find_col_by_exact(ws, header_row, "类别")
+        c_serial = _find_col_by_exact(ws, header_row, "序号")
 
         missing = []
         if c_subject is None:
@@ -409,8 +658,32 @@ def run_smart_schedule_on_total_sheet(path: str) -> SmartScheduleResult:
             missing.append("付款截止日期")
         if c_payment_plan is None:
             missing.append("付款计划（表头含「付款计划」且非「付款计划确认」）")
+        if c_category is None:
+            missing.append("类别")
         if missing:
             raise ValueError("表头缺少必要列：" + "、".join(missing))
+
+        if len(wb.worksheets) < 2:
+            raise ValueError("排款计划总表第二页（Sheet2）不存在，无法读取「类别」「类别优先级」对照。")
+        ws2 = wb.worksheets[1]
+        sheet2_cat = _find_sheet2_category_header_cols(ws2)
+        if sheet2_cat is None:
+            raise ValueError("未在 Sheet2 表头区域找到「类别」与「类别优先级」列。")
+        h2_cat, c2_cat_col, c2_pri_col = sheet2_cat
+        cat_map = _load_category_priority_map(ws2, h2_cat, c2_cat_col, c2_pri_col)
+
+        if len(wb.worksheets) < 3:
+            raise ValueError(
+                "排款计划总表第三页（Sheet3）不存在，无法读取银行「应付款优先级」或「付款优先级」对照。"
+            )
+        ws3 = wb.worksheets[2]
+        sheet3_hdr = _find_sheet3_bank_priority_header_cols(ws3)
+        if sheet3_hdr is None:
+            raise ValueError(
+                "未在 Sheet3 表头区域找到「银行名称」与「应付款优先级」或「付款优先级」列。"
+            )
+        h3_bank, c3_bank_col, c3_pri_col = sheet3_hdr
+        bank_pri_map = _load_sheet3_bank_priority_map(ws3, h3_bank, c3_bank_col, c3_pri_col)
 
         assert c_payment_plan is not None and c_total_sched is not None
         _prepare_sheet_three_steps(ws, header_row, c_payment_plan, c_total_sched)
@@ -419,19 +692,30 @@ def run_smart_schedule_on_total_sheet(path: str) -> SmartScheduleResult:
         if c_invoice >= c_cutoff:
             raise ValueError("「当月已开票余额」列须位于「截止」列左侧。")
 
-        payment_cols: List[int] = list(range(c_pay0, c_total_sched + 1))
+        bank_cols: List[int] = list(range(c_pay0, c_total_sched))
+        if not bank_cols:
+            raise ValueError("「第1笔」须位于「合计已排款」左侧，且两列之间至少有一列可排款。")
+        payment_cols: List[int] = _payment_cols_sorted_by_sheet3_bank_priority(
+            ws, bank_cols, bank_pri_map
+        )
 
         max_r = ws.max_row or 0
-        priority0_rows: List[int] = []
+        candidates: List[Tuple[int, int]] = []
         for r in range(header_row + 1, max_r + 1):
-            if not _is_priority_zero(ws.cell(row=r, column=c_priority).value):
+            pl = _priority_level_0_2(ws.cell(row=r, column=c_priority).value)
+            if pl is None:
                 continue
             subj = _cell_text_normalized(ws.cell(row=r, column=c_subject).value)
             if not subj:
                 continue
-            priority0_rows.append(r)
+            candidates.append((r, pl))
+        candidates = _order_candidates_by_category_within_priority(
+            ws, candidates, c_category, c_serial, cat_map
+        )
 
-        rows_priority0 = len(priority0_rows)
+        rows_priority0 = sum(1 for _r, pl in candidates if pl == 0)
+        rows_priority1 = sum(1 for _r, pl in candidates if pl == 1)
+        rows_priority2 = sum(1 for _r, pl in candidates if pl == 2)
         rows_scanned = 0
         rows_written = 0
         rows_skipped = 0
@@ -448,28 +732,29 @@ def run_smart_schedule_on_total_sheet(path: str) -> SmartScheduleResult:
             bal_cache[c] = new_b
             ws.cell(row=5, column=c, value=new_b)
 
-        for r in priority0_rows:
+        for r, prio in candidates:
             subj = _cell_text_normalized(ws.cell(row=r, column=c_subject).value)
             n_period = _protocol_period_months(ws.cell(row=r, column=c_agreement).value)
             if n_period is None:
                 rows_skipped += 1
                 continue
 
-            n_total = 0.0
-            for c in range(c_invoice + 1, c_cutoff):
-                mn = _month_bucket_n(ws.cell(row=header_row, column=c).value)
-                if mn is None:
-                    continue
-                if mn < n_period:
-                    continue
-                cell_val = ws.cell(row=r, column=c).value
-                num = _coerce_numeric_for_sum(cell_val)
-                if num is not None:
-                    n_total += num
+            # nTotalSum：仅此一处按当前行 priority 计算；下方匹配列写入均使用本变量。
+            n_total_sum = _compute_ntotal_for_priority(
+                ws,
+                header_row,
+                r,
+                c_invoice,
+                c_cutoff,
+                n_period,
+                prio,
+                priority1_plan_pct,
+                priority2_plan_pct,
+            )
 
             rows_scanned += 1
 
-            if n_total <= 0:
+            if n_total_sum <= 0:
                 rows_skipped += 1
                 continue
 
@@ -479,7 +764,7 @@ def run_smart_schedule_on_total_sheet(path: str) -> SmartScheduleResult:
             placed = False
             for c in payment_cols:
                 bal = _col_balance(c)
-                if bal < n_total:
+                if bal < n_total_sum:
                     continue
                 if not _subject_contained_in_pay_region(subj, ws.cell(row=7, column=c).value):
                     continue
@@ -487,28 +772,39 @@ def run_smart_schedule_on_total_sheet(path: str) -> SmartScheduleResult:
                     continue
                 if not _loan_deadline_ok(ws, c, due_cell):
                     continue
-                ws.cell(row=r, column=c, value=n_total)
-                _reduce_balance(c, n_total)
+                ws.cell(row=r, column=c, value=n_total_sum)
+                _reduce_balance(c, n_total_sum)
                 assert c_payment_plan is not None
                 old_plan = _coerce_numeric_for_sum(
                     ws.cell(row=r, column=c_payment_plan).value
                 )
                 plan_base = float(old_plan) if old_plan is not None else 0.0
-                ws.cell(row=r, column=c_payment_plan, value=plan_base + n_total)
+                ws.cell(row=r, column=c_payment_plan, value=plan_base + n_total_sum)
                 rows_written += 1
                 placed = True
                 break
             if not placed:
                 rows_skipped += 1
 
+        plan_sum = _sum_payment_plan_non_empty_numeric(
+            ws, header_row, c_payment_plan, max_r
+        )
         wb.save(path)
     finally:
         wb.close()
 
+    payable = sum_sheet1_row4_after_payout_through_total_scheduled(path)
+    reserved: Optional[float] = None
+    if payable is not None:
+        reserved = float(payable) - plan_sum
+
     return SmartScheduleResult(
         path=path,
         rows_priority0=rows_priority0,
+        rows_priority1=rows_priority1,
+        rows_priority2=rows_priority2,
         rows_scanned=rows_scanned,
         rows_written=rows_written,
         rows_skipped=rows_skipped,
+        reserved_total=reserved,
     )
