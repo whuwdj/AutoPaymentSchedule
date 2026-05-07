@@ -1,0 +1,78 @@
+智能排款 — 打包与给对方使用说明
+================================
+
+一、两种给对方的方式
+--------------------
+
+【方式 A — 推荐】打包成可执行文件（对方电脑无需安装 Python）
+
+  你在自己电脑上执行打包脚本后，把「程序 + 数据文件夹」一起发给对方即可。
+
+  · macOS（在本项目目录打开「终端」）：
+
+      chmod +x build_release.sh
+      ./build_release.sh
+
+    生成结果在 dist 目录：
+      - 智能排款.app
+      - AutoPaymentScheduleFile（总表、明细模板目录，必须与 .app 在同一文件夹内）
+
+    发给别人时：将「智能排款.app」和「AutoPaymentScheduleFile」放在同一个文件夹里，
+    可打成 zip 解压即用。对方双击「智能排款.app」启动。
+
+    若系统提示「无法打开」：在 app 上右键 → 打开 → 仍要打开（未签名的开发者应用）。
+
+  · Windows（在本项目目录打开「命令提示符」或 PowerShell）：
+
+      build_release.bat
+
+    生成结果：把整个 dist\智能排款 文件夹发给对方（内含 智能排款.exe、_internal、
+    与同级的 AutoPaymentScheduleFile）。对方进入该文件夹，双击「智能排款.exe」。
+
+  打包环境要求：Python 3.10+，首次会自动创建 .venv 并安装依赖（含 PyInstaller）。
+
+【方式 B】发源码 + 让对方本机装 Python（适合会配环境的同事）
+
+  把整个项目文件夹给对方，对方安装 Python 3.10+ 并勾选 Add to PATH，然后：
+
+      cd 项目目录
+      python -m venv .venv
+      .venv\Scripts\activate          （Windows）
+      source .venv/bin/activate         （macOS / Linux）
+      pip install -r requirements.txt
+      python main.py
+
+  Windows 快捷方式：可双击项目里的「run.bat」（优先使用 .venv 里的 Python）。
+  也可把「run.bat」发送到桌面快捷方式，实现一键启动。
+
+
+二、工作区目录说明（两种方式通用逻辑）
+--------------------------------------
+
+  程序会在「程序所在目录」下使用文件夹：
+
+      AutoPaymentScheduleFile\TotalSheet
+      AutoPaymentScheduleFile\DetailTemplate
+
+  打包后该文件夹必须与可执行程序保持上述相对位置（打包脚本已自动复制到 dist）。
+
+
+三、可选：应用图标
+------------------
+
+  若存在 app.ico，打包时会自动用作窗口/可执行文件图标。
+  可用「python generate_icon.py」从项目资源生成（需已安装 Pillow）。
+
+
+四、常见问题
+------------
+
+  Q：对方 mac 上双击没反应？
+  A：检查是否把 AutoPaymentScheduleFile 与 .app 放在同一目录；首次可能被 Gatekeeper 拦截，请用右键→打开。
+
+  Q：Windows 报缺 DLL 或杀毒软件拦截？
+  A：多为误报，可加入信任区；确保发的是完整的「智能排款」文件夹，不要只发一个 exe。
+
+  Q：能否做成单个安装包（.msi / .dmg）？
+  A：可以，需在对应系统上用 Inno Setup、WiX（Windows）或 create-dmg（macOS）等工具再包一层；
+     当前脚本给出的是「绿色版」目录，拷贝即可用，一般已足够。

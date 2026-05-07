@@ -53,6 +53,7 @@ from paths import (
     detail_template_dir,
     ensure_workspace,
     get_base_dir,
+    get_program_dir,
     total_sheet_dir,
 )
 from smart_schedule import SmartScheduleResult, run_smart_schedule_on_total_sheet
@@ -88,7 +89,7 @@ SHOW_BANK_SETTINGS_CARD = False
 
 
 def _app_dir() -> str:
-    return os.path.dirname(os.path.abspath(__file__))
+    return get_program_dir()
 
 
 def _load_window_icon() -> QIcon:
