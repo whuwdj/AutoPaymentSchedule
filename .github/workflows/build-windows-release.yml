@@ -1,0 +1,47 @@
+# 在微软 Windows 虚拟机上编译，产出可在 Windows 运行的绿色版 zip。
+# 在 Mac 上无法交叉编译出可用的 Windows exe，请用本工作流或在本机 Windows 运行 build_release.bat。
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: PyInstaller
+        run: python -m PyInstaller --noconfirm 智能排款.spec
+
+      - name: Copy AutoPaymentScheduleFile into dist
+        shell: pwsh
+        run: |
+          $dist = Join-Path "dist" "智能排款"
+          $target = Join-Path $dist "AutoPaymentScheduleFile"
+          if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+          Copy-Item -Recurse -Force "AutoPaymentScheduleFile" $target
+
+      - name: Zip release folder
+        shell: pwsh
+        run: |
+          $folder = Join-Path "dist" "智能排款"
+          $zip = "智能排款-Windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item -Force $zip }
+          Compress-Archive -Path $folder -DestinationPath $zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 智能排款-Windows-x64
+          path: 智能排款-Windows-x64.zip
