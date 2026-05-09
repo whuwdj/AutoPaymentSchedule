@@ -8,11 +8,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:  # 👈 关键：加上写权限，解决403
+    permissions:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5  # 👈 升级到 v5，彻底消除 Node 警告
 
       - name: Install 7-Zip
         run: sudo apt-get install -y p7zip-full
@@ -29,7 +29,7 @@ jobs:
             -x!".DS_Store"
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v2  # 👈 升级到v2，消除Node警告
+        uses: softprops/action-gh-release@v2
         with:
           files: "智能排款系统_v*_Windows兼容版.zip"
         env:
