@@ -3,7 +3,7 @@
 智能排款：读取总表 Sheet1（程序目录 AutoPaymentScheduleFile/TotalSheet 下 Excel），
 初始化表后按付款优先级 0→1→2 依次处理；同档内再按 Sheet2「类别优先级」与 Sheet1「序号」排序，
 Sheet1 类别未在 Sheet2 出现的行排在同档末尾且顺序随机；尝试各「笔」列时仅调整遍历顺序（不改列位置）：
-按 Sheet3 银行应付款/付款优先级数值升序，未配置银行排最后；账期汇总、三条件匹配排款列、写回金额并扣减第 5 行排款余额。
+按 Sheet3 银行应付款/付款优先级数值升序，未配置银行排最后；账期与应收汇总规则、三条件匹配排款列、写回金额并扣减第 5 行排款余额（优先级 1/2 在总表月份区标浅绿）。
 """
 
 from __future__ import annotations
@@ -15,10 +15,13 @@ from collections import defaultdict
 from copy import copy
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import Cell, MergedCell
+from openpyxl.styles import GradientFill, PatternFill
+from openpyxl.styles.colors import Color
+from openpyxl.styles.fills import Stop
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -328,6 +331,283 @@ def _sum_over_invoice_cutoff_window(
     return total
 
 
+_LIGHT_GREEN_FILL = PatternFill(
+    patternType="solid", fgColor="FFC6EFCE", bgColor="FFC6EFCE"
+)
+
+
+def _gradient_left_base_color(cell: Union[Cell, MergedCell]) -> Color:
+    """渐变左侧：沿用写入前单元格原有填充色（无填充或无法解析时退化为白）。"""
+    if isinstance(cell, MergedCell):
+        return Color("FFFFFFFF")
+    f = cell.fill
+    pt = getattr(f, "patternType", None)
+    if pt in (None, "none"):
+        return Color("FFFFFFFF")
+    if pt == "solid":
+        col = getattr(f, "fgColor", None)
+        if col is not None:
+            rgb = getattr(col, "rgb", None)
+            if rgb:
+                s = str(rgb).strip().upper()
+                if len(s) == 6 and all(c in "0123456789ABCDEF" for c in s):
+                    return Color("FF" + s)
+                if len(s) == 8 and all(c in "0123456789ABCDEF" for c in s):
+                    return Color(s)
+    return Color("FFFFFFFF")
+
+
+def _fill_partial_light_green_from_right(
+    ws: Worksheet, row: int, col: int, fraction_green_from_right: float
+) -> None:
+    """
+    仅本格：把单元格整体宽度视为 100%，右侧 fraction_green_from_right（0~1）为浅绿，
+    左侧 (1−该比例) 保持原格填充色（从写入渐变前的 cell.fill 读取）。fraction 即
+    （nMonth 格数值 − 已开票×(nPeriodPercent−nPercentOne)/100）/ nMonth 格数值
+    （百分数差先 /100 再乘已开票，与 nPeriodPercent 分制一致）。
+
+    线性渐变 degree=0：位置 0=左、1=右；分界在 1−p，过渡带极窄以免吃掉比例。
+    """
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        return
+    p = max(0.0, min(1.0, float(fraction_green_from_right)))
+    if p <= 0.0:
+        return
+    if p >= 1.0 - 1e-12:
+        cell.fill = copy(_LIGHT_GREEN_FILL)
+        return
+
+    left_end = 1.0 - p
+    base = _gradient_left_base_color(cell)
+    # 过渡带不得超过较窄一侧的 2%，且上限极小，保证「约 p 宽为绿、约 1−p 为原底色」
+    span = min(p, left_end)
+    eps = min(5e-5, max(1e-9, span * 0.02))
+    if left_end <= eps * 2:
+        cell.fill = copy(_LIGHT_GREEN_FILL)
+        return
+
+    t0 = 0.0
+    t1 = max(t0 + 1e-12, left_end - eps)
+    t2 = min(1.0 - 1e-12, left_end + eps)
+    t3 = 1.0
+    if t2 <= t1 + 1e-12:
+        t2 = min(t3, t1 + 2e-12)
+    if t2 >= t3:
+        cell.fill = copy(_LIGHT_GREEN_FILL)
+        return
+
+    green = Color("FFC6EFCE")
+    stops = (Stop(base, t0), Stop(base, t1), Stop(green, t2), Stop(green, t3))
+    cell.fill = GradientFill(type="linear", degree=0, stop=stops)
+
+
+def _cell_is_numeric_for_green_highlight(value: object) -> bool:
+    """非空、且为有限数值型（排除 bool）、且大于 0 才标浅绿；其余不处理。"""
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return False
+    if isinstance(value, (datetime, date)):
+        return False
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return False
+        return float(value) > 0.0
+    return False
+
+
+def _set_cell_light_green_if_numeric(ws: Worksheet, row: int, col: int) -> None:
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        return
+    if not _cell_is_numeric_for_green_highlight(cell.value):
+        return
+    cell.fill = copy(_LIGHT_GREEN_FILL)
+
+
+def _cols_qualifying_month(
+    ws: Worksheet, header_row: int, r: int, c_invoice: int, c_cutoff: int, n_period: float
+) -> List[int]:
+    out: List[int] = []
+    for c in range(c_invoice + 1, c_cutoff):
+        mn = _month_bucket_n(ws.cell(row=header_row, column=c).value)
+        if mn is None:
+            continue
+        if float(mn) < float(n_period):
+            continue
+        out.append(c)
+    return out
+
+
+def _find_last_nonempty_numeric_col(
+    ws: Worksheet, r: int, cols: List[int],
+) -> Optional[int]:
+    for c in reversed(cols):
+        if _coerce_numeric_for_sum(ws.cell(row=r, column=c).value) is not None:
+            return c
+    return None
+
+
+def _find_first_col_by_month_in_window(
+    ws: Worksheet, header_row: int, c_invoice: int, c_cutoff: int, target_mn: int
+) -> Optional[int]:
+    for c in range(c_invoice + 1, c_cutoff):
+        mn = _month_bucket_n(ws.cell(row=header_row, column=c).value)
+        if mn == target_mn:
+            return c
+    return None
+
+
+def _sum_numeric_from_col_right_in_window(
+    ws: Worksheet, r: int, c_start: int, c_cutoff: int
+) -> float:
+    s = 0.0
+    for c in range(c_start, c_cutoff):
+        n = _coerce_numeric_for_sum(ws.cell(row=r, column=c).value)
+        if n is not None:
+            s += float(n)
+    return s
+
+
+def _highlight_equal_band(
+    ws: Worksheet, r: int, c_anchor: int, c_cutoff: int,
+) -> None:
+    for c in range(c_anchor, c_cutoff):
+        _set_cell_light_green_if_numeric(ws, r, c)
+
+
+def _normalize_anchor_cell_strip_slash_suffix(ws: Worksheet, r: int, c: int) -> Optional[float]:
+    """
+    锚点格若为「金额/…」文本，去掉斜杠及后缀，写回左侧金额（数值），并返回该金额。
+    已是纯数值且 >0 则不改写，直接返回。
+    """
+    cell = ws.cell(row=r, column=c)
+    if isinstance(cell, MergedCell):
+        return None
+    v = cell.value
+    if isinstance(v, str) and "/" in v:
+        left = v.split("/", 1)[0].strip()
+        n = _coerce_numeric_for_sum(left)
+        if n is None or float(n) <= 0:
+            return None
+        fv = float(n)
+        if abs(fv - round(fv)) < 1e-9:
+            cell.value = int(round(fv))
+        else:
+            cell.value = fv
+        return fv
+    if _cell_is_numeric_for_green_highlight(v):
+        return float(v)
+    return None
+
+
+def _highlight_greater_band(
+    ws: Worksheet,
+    header_row: int,
+    r: int,
+    c_invoice: int,
+    c_cutoff: int,
+    current_mn: int,
+    current_c: int,
+    npct: float,
+    thr_pct: float,
+    inv: float,
+) -> None:
+    c_plus = _find_first_col_by_month_in_window(
+        ws, header_row, c_invoice, c_cutoff, current_mn + 1
+    )
+    if c_plus is not None:
+        for c in range(c_plus, c_cutoff):
+            _set_cell_light_green_if_numeric(ws, r, c)
+    fv = _normalize_anchor_cell_strip_slash_suffix(ws, r, current_c)
+    if fv is None:
+        return
+    # nPeriodPercent、nPercentOne 为 0～100 时：已开票×(差)/100 为超额金额（与 nPeriodPercent 口径一致）
+    delta_amt = float(inv) * (float(npct) - float(thr_pct)) / 100.0
+    suffix = fv - delta_amt
+    if suffix < 0:
+        suffix = 0.0
+    # 整格宽度=100%：右侧 prop_green 为浅绿，左侧 1−prop_green 保持原格填充色（与分式一致）
+    prop_green = (suffix / fv) if fv > 0 else 0.0
+    _fill_partial_light_green_from_right(ws, r, current_c, prop_green)
+
+
+def _compute_ntotal_priority12_with_highlights(
+    ws: Worksheet,
+    header_row: int,
+    r: int,
+    c_invoice: int,
+    c_cutoff: int,
+    n_period: float,
+    thr_pct: float,
+) -> float:
+    """
+    优先级 1/2：nTotalSum = 已开票 * thr_pct / 100；按「最后非空锚点 + nMonth 递减」规则
+    计算 nPeriodPercent（百分数），与 thr_pct 比较后标浅绿；界面 thr 为整数百分数。
+    """
+    inv = _coerce_numeric_for_sum(ws.cell(row=r, column=c_invoice).value)
+    if inv is None or float(inv) <= 0:
+        return 0.0
+    inv_f = float(inv)
+    n_total_sum = inv_f * float(thr_pct) / 100.0
+
+    qual = _cols_qualifying_month(ws, header_row, r, c_invoice, c_cutoff, n_period)
+    c_anchor = _find_last_nonempty_numeric_col(ws, r, qual)
+    if c_anchor is None:
+        return 0.0
+
+    mn0 = _month_bucket_n(ws.cell(row=header_row, column=c_anchor).value)
+    if mn0 is None:
+        return 0.0
+
+    v0 = _coerce_numeric_for_sum(ws.cell(row=r, column=c_anchor).value)
+    if v0 is None:
+        return 0.0
+
+    npct = (float(v0) / inv_f) * 100.0
+    thr = float(thr_pct)
+
+    if math.isclose(npct, thr, rel_tol=0.0, abs_tol=1e-6):
+        _highlight_equal_band(ws, r, c_anchor, c_cutoff)
+        return n_total_sum
+
+    if npct < thr - 1e-9:
+        current_c = c_anchor
+        current_mn = int(mn0)
+        max_steps = 200
+        for _ in range(max_steps):
+            c_col = _find_first_col_by_month_in_window(
+                ws, header_row, c_invoice, c_cutoff, current_mn - 1
+            )
+            if c_col is None:
+                break
+            current_mn -= 1
+            current_c = c_col
+            total = _sum_numeric_from_col_right_in_window(ws, r, current_c, c_cutoff)
+            npct = (total / inv_f) * 100.0
+            if not (npct < thr - 1e-9):
+                break
+
+        if math.isclose(npct, thr, rel_tol=0.0, abs_tol=1e-6):
+            _highlight_equal_band(ws, r, current_c, c_cutoff)
+        elif npct > thr + 1e-9:
+            _highlight_greater_band(
+                ws,
+                header_row,
+                r,
+                c_invoice,
+                c_cutoff,
+                current_mn,
+                current_c,
+                npct,
+                thr,
+                inv_f,
+            )
+
+    return n_total_sum
+
+
 def _compute_ntotal_for_priority(
     ws: Worksheet,
     header_row: int,
@@ -340,34 +620,21 @@ def _compute_ntotal_for_priority(
     priority2_plan_pct: float,
 ) -> float:
     """
-    计算本行 nTotalSum（供排款列写入与余额扣减使用；调用方须在主循环原 nTotalSum 位置赋值）。
+    计算本行 nTotalSum（供排款列写入与余额扣减使用）。
 
-    priority 0：nTotalSum = 区间内 mn ≥ nPeriodCount（协议账期换算）的数值和。
-    priority 1/2：从 mn ≥ ceil(nPeriodCount) 起算；nPeriod=(和/已开票余额)*100%，
-    与对应百分比比较，偏大则表头起始月份 +1 再算，直到 nPeriod≤阈值或无法再推进。
+    priority 0：区间内表头月份 mn ≥ nPeriodCount 的单元格数值和。
+    priority 1/2：nTotalSum = 已开票 *（界面整数百分数）/ 100；锚点为 mn≥nPeriodCount
+    区间内自右向左最后一个数值非空列，按 nPeriodPercent 与阈值比较并标浅绿（见产品说明）。
     """
     if priority_level == 0:
         return _sum_over_invoice_cutoff_window(
             ws, header_row, r, c_invoice, c_cutoff, n_period
         )
 
-    inv = _coerce_numeric_for_sum(ws.cell(row=r, column=c_invoice).value)
-    if inv is None or inv <= 0:
-        return 0.0
-
     thr = priority1_plan_pct if priority_level == 1 else priority2_plan_pct
-    start_month = int(math.ceil(n_period))
-    max_safety = 64
-    for _ in range(max_safety):
-        n_period_count1 = _sum_over_invoice_cutoff_window(
-            ws, header_row, r, c_invoice, c_cutoff, float(start_month)
-        )
-        n_period_pct = (n_period_count1 / float(inv)) * 100.0
-        if n_period_pct > thr:
-            start_month += 1
-            continue
-        return n_period_count1
-    return 0.0
+    return _compute_ntotal_priority12_with_highlights(
+        ws, header_row, r, c_invoice, c_cutoff, n_period, thr
+    )
 
 
 def _protocol_period_months(value: object) -> Optional[float]:
@@ -613,7 +880,7 @@ def run_smart_schedule_on_total_sheet(
     在排款计划总表 Sheet1 上执行智能排款：表初始化后按优先级 0、1、2 顺序处理各行；
     同档内按 Sheet2 类别优先级与 Sheet1 序号排序（类别未对照到的行在同档末尾随机顺序）；
     匹配各「笔」列时按 Sheet3 银行优先级数值升序遍历列（仅处理顺序，不改表结构；未配置银行排最后）。
-    优先级 1、2 的应付占比阈值分别为 priority1_plan_pct、priority2_plan_pct（与界面输入一致，如 30 表示 30%）。
+    优先级 1、2：界面为整数百分数（如 30 表示 30%），与 nPeriodPercent 同为 0～100 分制；nTotalSum = 已开票×该百分数/100。
     仅支持 .xlsx。
     """
     if _is_xls(path):

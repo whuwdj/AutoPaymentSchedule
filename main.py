@@ -16,7 +16,7 @@ import traceback
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QDoubleValidator, QFont, QIcon
+from PyQt6.QtGui import QFont, QIcon, QIntValidator
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -358,7 +358,7 @@ class MainWindow(QWidget):
 
         self.edit_priority1_pct = QLineEdit()
         self.edit_priority1_pct.setObjectName("figmaInput")
-        self.edit_priority1_pct.setValidator(QDoubleValidator(0.0, 100.0, 2))
+        self.edit_priority1_pct.setValidator(QIntValidator(0, 100))
         self.edit_priority1_pct.setFixedWidth(m.W_PCT_INPUT)
         self.edit_priority1_pct.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
@@ -368,7 +368,7 @@ class MainWindow(QWidget):
 
         self.edit_priority2_pct = QLineEdit()
         self.edit_priority2_pct.setObjectName("figmaInput")
-        self.edit_priority2_pct.setValidator(QDoubleValidator(0.0, 100.0, 2))
+        self.edit_priority2_pct.setValidator(QIntValidator(0, 100))
         self.edit_priority2_pct.setFixedWidth(m.W_PCT_INPUT)
         self.edit_priority2_pct.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
@@ -932,10 +932,10 @@ class MainWindow(QWidget):
             )
             return
         try:
-            pct1 = float(self.edit_priority1_pct.text().strip())
-            pct2 = float(self.edit_priority2_pct.text().strip())
+            pct1 = int(self.edit_priority1_pct.text().strip(), 10)
+            pct2 = int(self.edit_priority2_pct.text().strip(), 10)
         except ValueError:
-            QMessageBox.warning(self, "提示", "优先级占应付额请输入有效数字。")
+            QMessageBox.warning(self, "提示", "优先级占应付额请输入有效整数（0～100）。")
             return
         try:
             res = run_smart_schedule_on_total_sheet(total_path, pct1, pct2)
