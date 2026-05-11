@@ -16,7 +16,7 @@ import traceback
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QIcon, QIntValidator
+from PyQt6.QtGui import QFont, QIcon, QValidator
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -59,6 +59,24 @@ from paths import (
 from smart_schedule import SmartScheduleResult, run_smart_schedule_on_total_sheet
 
 _EXCEL_SUFFIXES = (".xlsx", ".xls")
+
+
+class _Percent0To100Validator(QValidator):
+    """仅允许 0～100 的整数，禁止前导零（仅允许单独一个「0」表示零）；空串为 Intermediate。"""
+
+    def validate(self, input_str: str, pos: int):
+        if input_str == "":
+            return QValidator.State.Intermediate, input_str, pos
+        if not input_str.isdigit():
+            return QValidator.State.Invalid, input_str, pos
+        if len(input_str) > 1 and input_str.startswith("0"):
+            return QValidator.State.Invalid, input_str, pos
+        if len(input_str) > 3:
+            return QValidator.State.Invalid, input_str, pos
+        v = int(input_str)
+        if v > 100:
+            return QValidator.State.Invalid, input_str, pos
+        return QValidator.State.Acceptable, input_str, pos
 
 
 def _is_excel_path(path: str) -> bool:
@@ -358,7 +376,8 @@ class MainWindow(QWidget):
 
         self.edit_priority1_pct = QLineEdit()
         self.edit_priority1_pct.setObjectName("figmaInput")
-        self.edit_priority1_pct.setValidator(QIntValidator(0, 100))
+        self.edit_priority1_pct.setMaxLength(3)
+        self.edit_priority1_pct.setValidator(_Percent0To100Validator())
         self.edit_priority1_pct.setFixedWidth(m.W_PCT_INPUT)
         self.edit_priority1_pct.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
@@ -368,7 +387,8 @@ class MainWindow(QWidget):
 
         self.edit_priority2_pct = QLineEdit()
         self.edit_priority2_pct.setObjectName("figmaInput")
-        self.edit_priority2_pct.setValidator(QIntValidator(0, 100))
+        self.edit_priority2_pct.setMaxLength(3)
+        self.edit_priority2_pct.setValidator(_Percent0To100Validator())
         self.edit_priority2_pct.setFixedWidth(m.W_PCT_INPUT)
         self.edit_priority2_pct.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed

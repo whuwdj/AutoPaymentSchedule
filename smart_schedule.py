@@ -3,7 +3,7 @@
 智能排款：读取总表 Sheet1（程序目录 AutoPaymentScheduleFile/TotalSheet 下 Excel），
 初始化表后按付款优先级 0→1→2 依次处理；同档内再按 Sheet2「类别优先级」与 Sheet1「序号」排序，
 Sheet1 类别未在 Sheet2 出现的行排在同档末尾且顺序随机；尝试各「笔」列时仅调整遍历顺序（不改列位置）：
-按 Sheet3 银行应付款/付款优先级数值升序，未配置银行排最后；账期与应收汇总规则、三条件匹配排款列、写回金额并扣减第 5 行排款余额（优先级 1/2 在总表月份区标浅绿）。
+按 Sheet3 银行应付款/付款优先级数值升序，未配置银行排最后；账期与应收汇总规则、三条件匹配排款列、写回金额并扣减第 5 行排款余额（优先级 0：自最左 mn≥nPeriod 列至截止前列中 >0 格浅绿；1/2 档按 nPeriodPercent 规则标浅绿）。
 """
 
 from __future__ import annotations
@@ -362,10 +362,8 @@ def _fill_partial_light_green_from_right(
 ) -> None:
     """
     仅本格：把单元格整体宽度视为 100%，右侧 fraction_green_from_right（0~1）为浅绿，
-    左侧 (1−该比例) 保持原格填充色（从写入渐变前的 cell.fill 读取）。fraction 即
-    （nMonth 格数值 − 已开票×(nPeriodPercent−nPercentOne)/100）/ nMonth 格数值
-    （百分数差先 /100 再乘已开票，与 nPeriodPercent 分制一致）。
-
+    左侧 (1−该比例) 保持原格填充色（从写入渐变前的 cell.fill 读取）。
+    fraction =（锚点格数值 − nPayablesSum×(nPeriodPercent−阈值百分数)/100）/ 锚点格数值。
     线性渐变 degree=0：位置 0=左、1=右；分界在 1−p，过渡带极窄以免吃掉比例。
     """
     cell = ws.cell(row=row, column=col)
@@ -418,10 +416,18 @@ def _cell_is_numeric_for_green_highlight(value: object) -> bool:
 
 
 def _set_cell_light_green_if_numeric(ws: Worksheet, row: int, col: int) -> None:
+    """
+    与 nPayablesSum / 锚点判定一致：用 _coerce_numeric_for_sum 解析（含文本数字），
+    仅当解析为有限数且 >0 时标浅绿（避免纯 int/float 判断导致「数字为文本」时整段不着色）。
+    """
     cell = ws.cell(row=row, column=col)
     if isinstance(cell, MergedCell):
         return
-    if not _cell_is_numeric_for_green_highlight(cell.value):
+    n = _coerce_numeric_for_sum(cell.value)
+    if n is None:
+        return
+    fv = float(n)
+    if not math.isfinite(fv) or fv <= 0.0:
         return
     cell.fill = copy(_LIGHT_GREEN_FILL)
 
@@ -445,6 +451,20 @@ def _find_last_nonempty_numeric_col(
 ) -> Optional[int]:
     for c in reversed(cols):
         if _coerce_numeric_for_sum(ws.cell(row=r, column=c).value) is not None:
+            return c
+    return None
+
+
+def _find_last_positive_amount_col(
+    ws: Worksheet, r: int, cols: List[int],
+) -> Optional[int]:
+    """mn 限定列内自右向左，最后一个可解析为有限数且 >0 的列（作 nMonth 锚点，与应付款格口径一致）。"""
+    for c in reversed(cols):
+        n = _coerce_numeric_for_sum(ws.cell(row=r, column=c).value)
+        if n is None:
+            continue
+        fv = float(n)
+        if math.isfinite(fv) and fv > 0.0:
             return c
     return None
 
@@ -474,6 +494,26 @@ def _highlight_equal_band(
     ws: Worksheet, r: int, c_anchor: int, c_cutoff: int,
 ) -> None:
     for c in range(c_anchor, c_cutoff):
+        _set_cell_light_green_if_numeric(ws, r, c)
+
+
+def _highlight_priority0_month_window(
+    ws: Worksheet,
+    header_row: int,
+    r: int,
+    c_invoice: int,
+    c_cutoff: int,
+    n_period: float,
+) -> None:
+    """
+    优先级 0：表头 mn≥nPeriodCount 的列中，取最左一列起至「截止」列之前，
+    凡本行单元格解析为有限数且 >0 则标浅绿。
+    """
+    qual = _cols_qualifying_month(ws, header_row, r, c_invoice, c_cutoff, n_period)
+    if not qual:
+        return
+    c_lo = min(qual)
+    for c in range(c_lo, c_cutoff):
         _set_cell_light_green_if_numeric(ws, r, c)
 
 
@@ -512,7 +552,7 @@ def _highlight_greater_band(
     current_c: int,
     npct: float,
     thr_pct: float,
-    inv: float,
+    n_payables_sum: float,
 ) -> None:
     c_plus = _find_first_col_by_month_in_window(
         ws, header_row, c_invoice, c_cutoff, current_mn + 1
@@ -523,8 +563,8 @@ def _highlight_greater_band(
     fv = _normalize_anchor_cell_strip_slash_suffix(ws, r, current_c)
     if fv is None:
         return
-    # nPeriodPercent、nPercentOne 为 0～100 时：已开票×(差)/100 为超额金额（与 nPeriodPercent 口径一致）
-    delta_amt = float(inv) * (float(npct) - float(thr_pct)) / 100.0
+    # 百分数差先 /100 再乘 nPayablesSum，与循环内 nPeriodPercent 分母一致
+    delta_amt = float(n_payables_sum) * (float(npct) - float(thr_pct)) / 100.0
     suffix = fv - delta_amt
     if suffix < 0:
         suffix = 0.0
@@ -543,33 +583,51 @@ def _compute_ntotal_priority12_with_highlights(
     thr_pct: float,
 ) -> float:
     """
-    优先级 1/2：nTotalSum = 已开票 * thr_pct / 100；按「最后非空锚点 + nMonth 递减」规则
-    计算 nPeriodPercent（百分数），与 thr_pct 比较后标浅绿；界面 thr 为整数百分数。
+    优先级 1/2：nTotalSum = nPayablesSum * thr_pct / 100（nPayablesSum 为 mn≥nPeriodCount 区间内数值和）。
+    起点 nPeriodPercent = 锚点格 nMonthValue / nPayablesSum * 100；递减循环内
+    nPeriodPercent =（该列及右侧可解析数值之和）/ nPayablesSum * 100。
+    锚点为 mn≥nPeriodCount 区间内自右向左最后一个数值非空列；与 thr_pct（界面整数百分数）比较后标浅绿。
     """
-    inv = _coerce_numeric_for_sum(ws.cell(row=r, column=c_invoice).value)
-    if inv is None or float(inv) <= 0:
-        return 0.0
-    inv_f = float(inv)
-    n_total_sum = inv_f * float(thr_pct) / 100.0
+    n_payables = _sum_over_invoice_cutoff_window(
+        ws, header_row, r, c_invoice, c_cutoff, n_period
+    )
+    n_total_sum = float(n_payables) * float(thr_pct) / 100.0
 
     qual = _cols_qualifying_month(ws, header_row, r, c_invoice, c_cutoff, n_period)
-    c_anchor = _find_last_nonempty_numeric_col(ws, r, qual)
+    c_anchor = _find_last_positive_amount_col(ws, r, qual)
     if c_anchor is None:
-        return 0.0
+        c_anchor = _find_last_nonempty_numeric_col(ws, r, qual)
+    if c_anchor is None or n_payables <= 0:
+        return n_total_sum
 
     mn0 = _month_bucket_n(ws.cell(row=header_row, column=c_anchor).value)
     if mn0 is None:
-        return 0.0
+        return n_total_sum
 
     v0 = _coerce_numeric_for_sum(ws.cell(row=r, column=c_anchor).value)
     if v0 is None:
-        return 0.0
+        return n_total_sum
 
-    npct = (float(v0) / inv_f) * 100.0
+    npct = (float(v0) / float(n_payables)) * 100.0
     thr = float(thr_pct)
 
     if math.isclose(npct, thr, rel_tol=0.0, abs_tol=1e-6):
         _highlight_equal_band(ws, r, c_anchor, c_cutoff)
+        return n_total_sum
+
+    if npct > thr + 1e-9:
+        _highlight_greater_band(
+            ws,
+            header_row,
+            r,
+            c_invoice,
+            c_cutoff,
+            int(mn0),
+            c_anchor,
+            npct,
+            thr,
+            float(n_payables),
+        )
         return n_total_sum
 
     if npct < thr - 1e-9:
@@ -585,7 +643,7 @@ def _compute_ntotal_priority12_with_highlights(
             current_mn -= 1
             current_c = c_col
             total = _sum_numeric_from_col_right_in_window(ws, r, current_c, c_cutoff)
-            npct = (total / inv_f) * 100.0
+            npct = (total / float(n_payables)) * 100.0
             if not (npct < thr - 1e-9):
                 break
 
@@ -602,7 +660,7 @@ def _compute_ntotal_priority12_with_highlights(
                 current_c,
                 npct,
                 thr,
-                inv_f,
+                float(n_payables),
             )
 
     return n_total_sum
@@ -622,14 +680,19 @@ def _compute_ntotal_for_priority(
     """
     计算本行 nTotalSum（供排款列写入与余额扣减使用）。
 
-    priority 0：区间内表头月份 mn ≥ nPeriodCount 的单元格数值和。
-    priority 1/2：nTotalSum = 已开票 *（界面整数百分数）/ 100；锚点为 mn≥nPeriodCount
-    区间内自右向左最后一个数值非空列，按 nPeriodPercent 与阈值比较并标浅绿（见产品说明）。
+    priority 0：nTotalSum = nPayablesSum；自最左 mn≥nPeriodCount 列至截止前列，
+    凡解析为 >0 的格标浅绿（见 _highlight_priority0_month_window）。
+    priority 1/2：nTotalSum = nPayablesSum *（界面整数百分数）/ 100；着色规则见
+    _compute_ntotal_priority12_with_highlights。
     """
     if priority_level == 0:
-        return _sum_over_invoice_cutoff_window(
+        n_payables = _sum_over_invoice_cutoff_window(
             ws, header_row, r, c_invoice, c_cutoff, n_period
         )
+        _highlight_priority0_month_window(
+            ws, header_row, r, c_invoice, c_cutoff, n_period
+        )
+        return n_payables
 
     thr = priority1_plan_pct if priority_level == 1 else priority2_plan_pct
     return _compute_ntotal_priority12_with_highlights(
@@ -880,7 +943,9 @@ def run_smart_schedule_on_total_sheet(
     在排款计划总表 Sheet1 上执行智能排款：表初始化后按优先级 0、1、2 顺序处理各行；
     同档内按 Sheet2 类别优先级与 Sheet1 序号排序（类别未对照到的行在同档末尾随机顺序）；
     匹配各「笔」列时按 Sheet3 银行优先级数值升序遍历列（仅处理顺序，不改表结构；未配置银行排最后）。
-    优先级 1、2：界面为整数百分数（如 30 表示 30%），与 nPeriodPercent 同为 0～100 分制；nTotalSum = 已开票×该百分数/100。
+    优先级 0：nTotalSum = nPayablesSum；自最左 mn≥nPeriod 列至截止列前本行数值 >0 的格标浅绿。
+    优先级 1、2：界面为整数百分数（如 30 表示 30%）；nTotalSum = nPayablesSum×该百分数/100；
+    nPeriodPercent 起点为锚点格/nPayablesSum×100，递减循环内为（列及右侧数值和）/nPayablesSum×100。
     仅支持 .xlsx。
     """
     if _is_xls(path):
