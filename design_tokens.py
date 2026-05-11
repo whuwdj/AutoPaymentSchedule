@@ -67,6 +67,30 @@ class Figma:
     W_COMBO_PAY_METHOD = 360
 
 
+def build_message_box_stylesheet() -> str:
+    """独立于主窗口 QSS，挂到 QApplication，避免 Win11 深色系统下 QMessageBox 深底 + 深字不可读。"""
+    t = Figma
+    return f"""
+    QMessageBox {{
+        background-color: {t.BG_CARD};
+        color: #262626;
+    }}
+    QMessageBox QLabel {{
+        color: #262626;
+        background-color: {t.BG_CARD};
+    }}
+    QMessageBox QPushButton {{
+        background-color: {t.BG_COMBO};
+        color: #262626;
+        border: 1px solid {t.CARD_BORDER};
+        border-radius: {t.RADIUS_BUTTON}px;
+        padding: 6px 18px;
+        min-width: 72px;
+        min-height: 24px;
+    }}
+    """
+
+
 def build_app_stylesheet() -> str:
     t = Figma
     return f"""

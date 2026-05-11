@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from design_tokens import Figma, build_app_stylesheet
+from design_tokens import Figma, build_app_stylesheet, build_message_box_stylesheet
 from detail_sheet_fill import fill_detail_workbook_from_total
 from excel_service import (
     EXCEL_FILTER,
@@ -1012,6 +1012,7 @@ def _apply_ui_font(app: QApplication) -> None:
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setStyleSheet(build_message_box_stylesheet())
     _apply_ui_font(app)
     try:
         ensure_workspace()
