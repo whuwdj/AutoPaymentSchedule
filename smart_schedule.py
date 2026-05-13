@@ -44,6 +44,7 @@ class SmartScheduleResult:
     rows_written: int
     rows_skipped: int
     reserved_total: Optional[float] = None
+    priority0_total: float = 0.0
 
 
 def _norm_h(text: str) -> str:
@@ -1051,6 +1052,7 @@ def run_smart_schedule_on_total_sheet(
         rows_scanned = 0
         rows_written = 0
         rows_skipped = 0
+        priority0_total = 0.0
 
         bal_cache: Dict[int, float] = {}
 
@@ -1083,6 +1085,9 @@ def run_smart_schedule_on_total_sheet(
                 priority1_plan_pct,
                 priority2_plan_pct,
             )
+
+            if prio == 0:
+                priority0_total += n_total_sum
 
             rows_scanned += 1
 
@@ -1139,4 +1144,5 @@ def run_smart_schedule_on_total_sheet(
         rows_written=rows_written,
         rows_skipped=rows_skipped,
         reserved_total=reserved,
+        priority0_total=priority0_total,
     )

@@ -370,6 +370,46 @@ def sum_sheet1_row4_after_payout_through_total_scheduled(path: str) -> Optional[
     return _sum_sheet1_row4_through_total_scheduled_xlsx(path)
 
 
+def sum_sheet1_payment_plan_column(path: str) -> Optional[float]:
+    """
+    Sheet1 中表头含「付款计划」且不含「确认」的列（通常为"4月付款计划"等），
+    对表头行以下非空且可解析为数字的单元格求和。
+    用于界面上「本月合计应付总额」展示。
+    """
+    if _is_xls(path):
+        return None  # .xls 暂不支持
+    if not os.path.isfile(path):
+        return None
+    wb = load_workbook(path, read_only=False, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        max_r = min(ws.max_row or 0, 100)
+        max_c = ws.max_column or 0
+        # 扫描前 30 行找到「付款计划」列
+        scan_r = min(30, ws.max_row or 0)
+        c_payment_plan: Optional[int] = None
+        header_row: Optional[int] = None
+        for r in range(1, scan_r + 1):
+            for c in range(1, max_c + 1):
+                h = _cell_text_normalized(ws.cell(row=r, column=c).value)
+                if "付款计划" in h and "确认" not in h:
+                    c_payment_plan = c
+                    header_row = r
+                    break
+            if c_payment_plan is not None:
+                break
+        if c_payment_plan is None or header_row is None:
+            return None
+        total = 0.0
+        for r in range(header_row + 1, max_r + 1):
+            n = _coerce_numeric_for_sum(ws.cell(row=r, column=c_payment_plan).value)
+            if n is not None:
+                total += n
+        return total
+    finally:
+        wb.close()
+
+
 def _sum_sheet1_row_after_payout_gross_xlsx(path: str, row_1based: int) -> Optional[float]:
     wb = load_workbook(path, read_only=False, data_only=True)
     try:
