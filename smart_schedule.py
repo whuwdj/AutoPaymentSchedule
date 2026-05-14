@@ -3,7 +3,8 @@
 智能排款：读取总表 Sheet1（程序目录 AutoPaymentScheduleFile/TotalSheet 下 Excel），
 初始化表后按付款优先级 0→1→2 依次处理；同档内再按 Sheet2「类别优先级」与 Sheet1「序号」排序，
 Sheet1 类别未在 Sheet2 出现的行排在同档末尾且顺序随机；尝试各「笔」列时仅调整遍历顺序（不改列位置）：
-按 Sheet3 银行应付款/付款优先级数值升序，未配置银行排最后；账期与应收汇总规则、三条件匹配排款列、写回金额并扣减第 5 行排款余额（优先级 0：自最左 mn≥nPeriod 列至截止前列中 >0 格浅绿；1/2 档按 nPeriodPercent 规则标浅绿）。
+按 Sheet3 银行应付款/付款优先级数值升序，未配置银行排最后；账期与应收汇总、nPeriodPercent 着色、写回「笔」列与付款计划并扣减第 5 行排款余额。
+卡片汇总：严格按账期应付额为优先级 0 的 nPayablesSum 之和；第一、二优先级应付额为排款后「付款计划」列中对应付款优先级行的金额之和；本月合计为三者的和。
 """
 
 from __future__ import annotations
@@ -45,6 +46,8 @@ class SmartScheduleResult:
     rows_skipped: int
     reserved_total: Optional[float] = None
     priority0_total: float = 0.0
+    priority1_total: float = 0.0
+    priority2_total: float = 0.0
 
 
 def _norm_h(text: str) -> str:
@@ -144,6 +147,28 @@ def _sum_payment_plan_non_empty_numeric(
         if isinstance(v, str) and not v.strip():
             continue
         n = _coerce_numeric_for_sum(v)
+        if n is not None:
+            total += float(n)
+    return total
+
+
+def _sum_payment_plan_by_priority(
+    ws: Worksheet,
+    header_row: int,
+    c_payment_plan: int,
+    c_priority: int,
+    max_r: int,
+    target_pl: int,
+) -> float:
+    """付款计划列：仅付款优先级 = target_pl 的数据行数值求和（排款写回后统计卡片用）。"""
+    total = 0.0
+    for r in range(header_row + 1, max_r + 1):
+        if _priority_level_0_2(ws.cell(row=r, column=c_priority).value) != target_pl:
+            continue
+        cell = ws.cell(row=r, column=c_payment_plan)
+        if isinstance(cell, MergedCell):
+            continue
+        n = _coerce_numeric_for_sum(cell.value)
         if n is not None:
             total += float(n)
     return total
@@ -456,20 +481,6 @@ def _find_last_nonempty_numeric_col(
     return None
 
 
-def _find_last_positive_amount_col(
-    ws: Worksheet, r: int, cols: List[int],
-) -> Optional[int]:
-    """mn 限定列内自右向左，最后一个可解析为有限数且 >0 的列（作 nMonth 锚点，与应付款格口径一致）。"""
-    for c in reversed(cols):
-        n = _coerce_numeric_for_sum(ws.cell(row=r, column=c).value)
-        if n is None:
-            continue
-        fv = float(n)
-        if math.isfinite(fv) and fv > 0.0:
-            return c
-    return None
-
-
 def _find_first_col_by_month_in_window(
     ws: Worksheet, header_row: int, c_invoice: int, c_cutoff: int, target_mn: int
 ) -> Optional[int]:
@@ -507,14 +518,10 @@ def _highlight_priority0_month_window(
     n_period: float,
 ) -> None:
     """
-    优先级 0：表头 mn≥nPeriodCount 的列中，取最左一列起至「截止」列之前，
-    凡本行单元格解析为有限数且 >0 则标浅绿。
+    优先级 0：仅表头 mn≥nPeriodCount 的列；本行单元格解析为有限数且 >0 则标浅绿。
     """
     qual = _cols_qualifying_month(ws, header_row, r, c_invoice, c_cutoff, n_period)
-    if not qual:
-        return
-    c_lo = min(qual)
-    for c in range(c_lo, c_cutoff):
+    for c in qual:
         _set_cell_light_green_if_numeric(ws, r, c)
 
 
@@ -595,9 +602,7 @@ def _compute_ntotal_priority12_with_highlights(
     n_total_sum = float(n_payables) * float(thr_pct) / 100.0
 
     qual = _cols_qualifying_month(ws, header_row, r, c_invoice, c_cutoff, n_period)
-    c_anchor = _find_last_positive_amount_col(ws, r, qual)
-    if c_anchor is None:
-        c_anchor = _find_last_nonempty_numeric_col(ws, r, qual)
+    c_anchor = _find_last_nonempty_numeric_col(ws, r, qual)
     if c_anchor is None or n_payables <= 0:
         return n_total_sum
 
@@ -681,7 +686,7 @@ def _compute_ntotal_for_priority(
     """
     计算本行 nTotalSum（供排款列写入与余额扣减使用）。
 
-    priority 0：nTotalSum = nPayablesSum；自最左 mn≥nPeriodCount 列至截止前列，
+    priority 0：nTotalSum = nPayablesSum；仅表头 mn≥nPeriodCount 的列中，
     凡解析为 >0 的格标浅绿（见 _highlight_priority0_month_window）。
     priority 1/2：nTotalSum = nPayablesSum *（界面整数百分数）/ 100；着色规则见
     _compute_ntotal_priority12_with_highlights。
@@ -944,9 +949,9 @@ def run_smart_schedule_on_total_sheet(
     在排款计划总表 Sheet1 上执行智能排款：表初始化后按优先级 0、1、2 顺序处理各行；
     同档内按 Sheet2 类别优先级与 Sheet1 序号排序（类别未对照到的行在同档末尾随机顺序）；
     匹配各「笔」列时按 Sheet3 银行优先级数值升序遍历列（仅处理顺序，不改表结构；未配置银行排最后）。
-    优先级 0：nTotalSum = nPayablesSum；自最左 mn≥nPeriod 列至截止列前本行数值 >0 的格标浅绿。
-    优先级 1、2：界面为整数百分数（如 30 表示 30%）；nTotalSum = nPayablesSum×该百分数/100；
-    nPeriodPercent 起点为锚点格/nPayablesSum×100，递减循环内为（列及右侧数值和）/nPayablesSum×100。
+    优先级 0：nTotalSum = nPayablesSum；仅 mn≥nPeriod 的账龄列中本行数值 >0 的格标浅绿。
+    优先级 1、2：nTotalSum = nPayablesSum×界面整数百分数/100；nPeriodPercent 锚点与递减、分格着色规则见 _compute_ntotal_priority12_with_highlights。
+    排款结束后：卡片第一、二优先级应付额 =「付款计划」列中付款优先级分别为 1、2 的行金额之和；严格按账期应付额仍为各优先级 0 行 nPayablesSum 之和；本月合计为三者之和。
     仅支持 .xlsx。
     """
     if _is_xls(path):
@@ -1126,6 +1131,13 @@ def run_smart_schedule_on_total_sheet(
         plan_sum = _sum_payment_plan_non_empty_numeric(
             ws, header_row, c_payment_plan, max_r
         )
+        assert c_priority is not None
+        priority1_total = _sum_payment_plan_by_priority(
+            ws, header_row, c_payment_plan, c_priority, max_r, 1
+        )
+        priority2_total = _sum_payment_plan_by_priority(
+            ws, header_row, c_payment_plan, c_priority, max_r, 2
+        )
         wb.save(path)
     finally:
         wb.close()
@@ -1145,4 +1157,6 @@ def run_smart_schedule_on_total_sheet(
         rows_skipped=rows_skipped,
         reserved_total=reserved,
         priority0_total=priority0_total,
+        priority1_total=priority1_total,
+        priority2_total=priority2_total,
     )

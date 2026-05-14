@@ -45,11 +45,10 @@ from excel_service import (
     find_latest_total_excel,
     read_banks,
     read_sheet1_summary_strip,
-    sum_sheet1_payment_plan_column,
     sum_sheet1_row4_after_payout_through_total_scheduled,
     write_bank_config_xlsx,
 )
-from owner_section_stats import load_owner_cost_panel_stats
+from owner_section_stats import OwnerCostPanelStats, load_owner_cost_panel_stats
 from paths import (
     detail_template_dir,
     ensure_workspace,
@@ -154,7 +153,7 @@ class MainWindow(QWidget):
         z = _format_payable_amount(0.0)
         self.lbl_payable_total_value.setText(z)
         self.lbl_reserved_total_value.setText(z)
-        self.lbl_total_payable_value.setText("")
+        self.lbl_total_payable_value.setText(z)
         self.lbl_strict_payable_value.setText(z)
         self.lbl_priority1_payable_value.setText(z)
         self.lbl_priority2_payable_value.setText(z)
@@ -248,8 +247,12 @@ class MainWindow(QWidget):
         tot_lbl.setText(_format_payable_amount(total_val))
         layout.addWidget(tot_w, 1)
 
-    def _refresh_owner_cost_panels(self, path: str | None) -> None:
-        """严格按账期 / 本月应付款 两行；path 为 None 时置为 0.00 占位。有总表时由「查看排款」调用以加载汇总。"""
+    def _refresh_owner_cost_panels(self, path: str | None) -> OwnerCostPanelStats | None:
+        """严格按账期 / 本月应付款 两行；path 为 None 时置为 0.00 占位。
+
+        有有效 .xlsx 总表时：从 Sheet4 顺序 + Sheet1「付款计划」汇总，
+        上行回填各成本 nCountZero* 与合计，下行 nCountAll* 与合计（见 owner_section_stats）。
+        返回本次统计对象；失败或无效 path 时返回 None。"""
         self._clear_hbox_layout(self._lay_strict_cost_row)
         self._clear_hbox_layout(self._lay_overall_cost_row)
 
@@ -264,7 +267,7 @@ class MainWindow(QWidget):
             self._fill_cost_summary_row(
                 self._lay_overall_cost_row, None, use_priority_zero=False
             )
-            return
+            return None
         try:
             stats = load_owner_cost_panel_stats(path)
         except Exception:
@@ -276,6 +279,7 @@ class MainWindow(QWidget):
         self._fill_cost_summary_row(
             self._lay_overall_cost_row, stats, use_priority_zero=False
         )
+        return stats
 
     @staticmethod
     def _right_align_cell(width_px: int, widget: QWidget) -> QWidget:
@@ -641,7 +645,7 @@ class MainWindow(QWidget):
         self.lbl_strict_payable_value.setText(z)
         self.lbl_priority1_payable_value.setText(z)
         self.lbl_priority2_payable_value.setText(z)
-        self.lbl_total_payable_value.setText("")
+        self.lbl_total_payable_value.setText(z)
 
     def _on_upload_total(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -831,26 +835,26 @@ class MainWindow(QWidget):
         dlg.setModal(True)
         dlg.setMinimumWidth(440)
         dlg.setStyleSheet(
-            """
-            QDialog#uploadPrereqDlg {
+            f"""
+            QDialog#uploadPrereqDlg {{
                 background-color: #E8F4FC;
                 border: 1px solid #91CAFF;
                 border-radius: 8px;
-            }
-            QLabel#uploadPrereqTitle {
-                color: #0958D9;
+            }}
+            QLabel#uploadPrereqTitle {{
+                color: {Figma.LABEL_PURPLE};
                 font-size: 17px;
                 font-weight: 600;
                 background: transparent;
-            }
-            QLabel#uploadPrereqBody {
-                color: #434343;
+            }}
+            QLabel#uploadPrereqBody {{
+                color: {Figma.LABEL_PURPLE};
                 font-size: 15px;
                 background: transparent;
-            }
-            QLabel#uploadPrereqIcon {
+            }}
+            QLabel#uploadPrereqIcon {{
                 background: transparent;
-            }
+            }}
             """
         )
         root = QVBoxLayout(dlg)
@@ -902,26 +906,26 @@ class MainWindow(QWidget):
         dlg.setModal(True)
         dlg.setMinimumWidth(460)
         dlg.setStyleSheet(
-            """
-            QDialog#smartOkDlg {
+            f"""
+            QDialog#smartOkDlg {{
                 background-color: #E8F4FC;
                 border: 1px solid #91CAFF;
                 border-radius: 8px;
-            }
-            QLabel#smartOkHead {
-                color: #0958D9;
+            }}
+            QLabel#smartOkHead {{
+                color: {Figma.LABEL_PURPLE};
                 font-size: 22px;
                 font-weight: 700;
                 background: transparent;
-            }
-            QLabel#smartOkBody {
-                color: #434343;
+            }}
+            QLabel#smartOkBody {{
+                color: {Figma.LABEL_PURPLE};
                 font-size: 15px;
                 background: transparent;
-            }
-            QLabel#smartOkIcon {
+            }}
+            QLabel#smartOkIcon {{
                 background: transparent;
-            }
+            }}
             """
         )
         root = QVBoxLayout(dlg)
@@ -1066,33 +1070,17 @@ class MainWindow(QWidget):
         self.lbl_strict_payable_value.setText(
             _format_payable_amount(res.priority0_total)
         )
-        # Set total payable from 付款计划 column sum
-        try:
-            plan_total = sum_sheet1_payment_plan_column(total_path)
-            if plan_total is not None:
-                self.lbl_total_payable_value.setText(
-                    _format_payable_amount(plan_total)
-                )
-        except Exception:
-            traceback.print_exc()
-
-        try:
-            p1 = int(self.edit_priority1_pct.text().strip(), 10)
-            p2 = int(self.edit_priority2_pct.text().strip(), 10)
-            total_payable_raw = self.lbl_total_payable_value.text().strip()
-            if total_payable_raw:
-                total_payable_f = float(total_payable_raw.replace(",", ""))
-            else:
-                total_payable_f = 0.0
-            self.lbl_priority1_payable_value.setText(
-                _format_payable_amount(total_payable_f * p1 / 100)
+        self.lbl_priority1_payable_value.setText(
+            _format_payable_amount(res.priority1_total)
+        )
+        self.lbl_priority2_payable_value.setText(
+            _format_payable_amount(res.priority2_total)
+        )
+        self.lbl_total_payable_value.setText(
+            _format_payable_amount(
+                res.priority0_total + res.priority1_total + res.priority2_total
             )
-            self.lbl_priority2_payable_value.setText(
-                _format_payable_amount(total_payable_f * p2 / 100)
-            )
-        except ValueError:
-            self.lbl_priority1_payable_value.setText("")
-            self.lbl_priority2_payable_value.setText("")
+        )
         detail_path = find_latest_total_excel(detail_template_dir())
         if detail_path:
             if detail_path.lower().endswith(".xlsx"):
@@ -1116,6 +1104,7 @@ class MainWindow(QWidget):
         self._show_smart_schedule_success_dialog(res)
 
     def _on_view_schedule_placeholder(self) -> None:
+        """查看排款：两板块按 Sheet4+Sheet1 回填；卡片1「严格按账期应付额」= 严格按账期付款板块合计（sum_zero）。"""
         ensure_workspace()
         ts = total_sheet_dir()
         if _workspace_dir_is_empty(ts):
@@ -1135,7 +1124,11 @@ class MainWindow(QWidget):
             )
             self._refresh_owner_cost_panels(None)
             return
-        self._refresh_owner_cost_panels(latest)
+        stats = self._refresh_owner_cost_panels(latest)
+        if stats is not None:
+            self.lbl_strict_payable_value.setText(
+                _format_payable_amount(stats.sum_zero)
+            )
 
 
 def _apply_ui_font(app: QApplication) -> None:

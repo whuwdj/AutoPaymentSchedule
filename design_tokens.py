@@ -33,6 +33,16 @@ class Figma:
     BG_COMBO = "#F5F5F5"
 
     PRIMARY = "#1677FF"
+    # 主按钮轻微「凸起」：上浅下深 + 略深外轮廓（hover / pressed 略变）
+    BTN_PRIMARY_FACE_TOP = "#4A9DFF"
+    BTN_PRIMARY_FACE_BOTTOM = "#1268E6"
+    BTN_PRIMARY_BORDER = "#0B52B8"
+    BTN_PRIMARY_FACE_TOP_HOVER = "#5AA8FF"
+    BTN_PRIMARY_FACE_BOTTOM_HOVER = "#1470ED"
+    BTN_PRIMARY_BORDER_HOVER = "#0C58C4"
+    BTN_PRIMARY_FACE_TOP_PRESSED = "#2C82E8"
+    BTN_PRIMARY_FACE_BOTTOM_PRESSED = "#0E56C4"
+    BTN_PRIMARY_BORDER_PRESSED = "#084494"
 
     RADIUS_INPUT = 4
     RADIUS_BUTTON = 4
@@ -73,29 +83,62 @@ def build_message_box_stylesheet() -> str:
     return f"""
     QMessageBox {{
         background-color: {t.BG_CARD};
-        color: #262626;
+        color: {t.LABEL_PURPLE};
     }}
     QMessageBox QLabel {{
-        color: #262626;
+        color: {t.LABEL_PURPLE};
         background-color: {t.BG_CARD};
     }}
     QMessageBox QPushButton {{
-        background-color: {t.BG_COMBO};
-        color: #262626;
-        border: 1px solid {t.CARD_BORDER};
+        color: {t.LABEL_PURPLE};
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #FAFAFA, stop:1 #E8E8E8);
+        border: 1px solid #CFCFCF;
         border-radius: {t.RADIUS_BUTTON}px;
         padding: 6px 18px;
         min-width: 72px;
         min-height: 24px;
+    }}
+    QMessageBox QPushButton:hover {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #FCFCFC, stop:1 #EDEDED);
+        border: 1px solid #C0C0C0;
+    }}
+    QMessageBox QPushButton:pressed {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #E4E4E4, stop:1 #DADADA);
+        border: 1px solid #B0B0B0;
     }}
     """
 
 
 def build_app_stylesheet() -> str:
     t = Figma
+    _g = (
+        f"qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+        f"stop:0 {t.BTN_PRIMARY_FACE_TOP}, stop:1 {t.BTN_PRIMARY_FACE_BOTTOM})"
+    )
+    _gh = (
+        f"qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+        f"stop:0 {t.BTN_PRIMARY_FACE_TOP_HOVER}, stop:1 {t.BTN_PRIMARY_FACE_BOTTOM_HOVER})"
+    )
+    _gp = (
+        f"qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+        f"stop:0 {t.BTN_PRIMARY_FACE_TOP_PRESSED}, stop:1 {t.BTN_PRIMARY_FACE_BOTTOM_PRESSED})"
+    )
+    _ids_flat = (
+        "figmaUploadBtn",
+        "figmaActionBtn",
+        "figmaBlue",
+        "figmaBlueSmall",
+    )
+    _sel = ", ".join(f"QPushButton#{i}" for i in _ids_flat)
+    _sel_h = ", ".join(f"QPushButton#{i}:hover" for i in _ids_flat)
+    _sel_p = ", ".join(f"QPushButton#{i}:pressed" for i in _ids_flat)
+    _sel_d = ", ".join(f"QPushButton#{i}:disabled" for i in _ids_flat)
     return f"""
     QWidget {{
-        color: #262626;
+        color: {t.LABEL_PURPLE};
         font-size: {t.BODY_PT}px;
     }}
     QWidget#centralRoot {{
@@ -117,12 +160,12 @@ def build_app_stylesheet() -> str:
         font-size: {t.SECTION_TITLE_PT}px;
     }}
     QLabel#figmaMicroTitle {{
-        color: {t.SECTION_MICRO};
+        color: {t.LABEL_PURPLE};
         font-size: {t.MICRO_PT * 1.5}px;
         font-weight: 500;
     }}
     QLabel#suffixYuan, QLabel#suffixUnit {{
-        color: {t.SUFFIX_UNIT};
+        color: {t.LABEL_PURPLE};
         font-size: {t.LABEL_PT}px;
     }}
     QLabel#summaryPurple {{
@@ -136,7 +179,7 @@ def build_app_stylesheet() -> str:
         min-width: 2em;
     }}
     QLabel#footerHint {{
-        color: {t.TEXT_MUTED};
+        color: {t.LABEL_PURPLE};
         font-size: {t.MICRO_PT}px;
     }}
 
@@ -147,7 +190,7 @@ def build_app_stylesheet() -> str:
         padding: 0 6px;
         min-height: 30px;
         max-height: 32px;
-        color: #262626;
+        color: {t.LABEL_PURPLE};
         font-size: {t.BODY_PT}px;
     }}
     QLineEdit#figmaInput:focus {{
@@ -160,7 +203,7 @@ def build_app_stylesheet() -> str:
         border-radius: {t.RADIUS_INPUT}px;
         padding: 8px 12px;
         min-height: 22px;
-        color: #262626;
+        color: {t.LABEL_PURPLE};
     }}
     QComboBox#figmaCombo:focus {{
         border: 1px solid {t.BORDER_INPUT_FOCUS};
@@ -172,60 +215,75 @@ def build_app_stylesheet() -> str:
     QComboBox#figmaCombo QAbstractItemView {{
         background: {t.BG_COMBO};
         border: 1px solid #D9D9D9;
+        color: {t.LABEL_PURPLE};
         selection-background-color: {t.PRIMARY};
         selection-color: #FFFFFF;
         outline: none;
     }}
 
-    QPushButton#figmaUploadBtn {{
-        background-color: {t.PRIMARY};
+    {_sel} {{
         color: #FFFFFF;
-        border: none;
+        background: {_g};
+        border: 1px solid {t.BTN_PRIMARY_BORDER};
         border-radius: {t.RADIUS_BUTTON}px;
+    }}
+    {_sel_h} {{
+        background: {_gh};
+        border: 1px solid {t.BTN_PRIMARY_BORDER_HOVER};
+    }}
+    {_sel_p} {{
+        background: {_gp};
+        border: 1px solid {t.BTN_PRIMARY_BORDER_PRESSED};
+    }}
+    {_sel_d} {{
+        background: #B5B5B5;
+        color: #EDEDED;
+        border: 1px solid #9E9E9E;
+    }}
+
+    QPushButton#figmaUploadBtn {{
         padding: 9px 17px;
         font-size: {t.UPLOAD_BTN_PT}px;
         min-height: 22px;
     }}
-
     QPushButton#figmaActionBtn {{
-        background-color: {t.PRIMARY};
-        color: #FFFFFF;
-        border: none;
-        border-radius: {t.RADIUS_BUTTON}px;
         padding: 18px 24px;
         font-size: {t.ACTION_BTN_PT}px;
         min-height: 22px;
     }}
-
     QPushButton#figmaBlue {{
-        background-color: {t.PRIMARY};
-        color: #FFFFFF;
-        border: none;
-        border-radius: {t.RADIUS_BUTTON}px;
         padding: 9px 17px;
         font-size: {t.BODY_PT}px;
         font-weight: 600;
         min-height: 22px;
     }}
-
     QPushButton#figmaBlueSmall {{
-        background-color: {t.PRIMARY};
-        color: #FFFFFF;
-        border: none;
-        border-radius: {t.RADIUS_BUTTON}px;
         padding: 6px 22px;
         font-weight: 600;
         min-height: 22px;
     }}
 
     QPushButton#figmaHero {{
-        background-color: {t.PRIMARY};
         color: #FFFFFF;
-        border: none;
+        background: {_g};
+        border: 1px solid {t.BTN_PRIMARY_BORDER};
         border-radius: 6px;
         padding: 20px 32px;
         font-weight: 700;
         font-size: 18px;
         min-height: 36px;
+    }}
+    QPushButton#figmaHero:hover {{
+        background: {_gh};
+        border: 1px solid {t.BTN_PRIMARY_BORDER_HOVER};
+    }}
+    QPushButton#figmaHero:pressed {{
+        background: {_gp};
+        border: 1px solid {t.BTN_PRIMARY_BORDER_PRESSED};
+    }}
+    QPushButton#figmaHero:disabled {{
+        background: #B5B5B5;
+        color: #EDEDED;
+        border: 1px solid #9E9E9E;
     }}
     """
