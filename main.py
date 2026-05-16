@@ -110,8 +110,8 @@ def _workspace_dir_is_empty(dir_path: str) -> bool:
 
 
 def _format_payable_amount(n: float) -> str:
-    """展示用：固定两位小数（整数亦显示 .00）。"""
-    return f"{n:.2f}"
+    """展示用：千分位 + 固定两位小数（如 8,734,102.39）。"""
+    return f"{n:,.2f}"
 
 
 # 「查看排款」前置：本会话未完成智能排款，或付款计划列无可解析数值（视为空）
@@ -149,8 +149,12 @@ class MainWindow(QWidget):
         self._n_count2 = 0.0
         self._n_count_total = 0.0
         self._smart_schedule_completed_ok = False
+        self._owner_cost_label_col_w = 0
+        self._owner_cost_amount_col_w = 0
+        self._owner_cost_yuan_col_w = 0
         self._initialize_program()
         self._setup_ui()
+        self._init_owner_cost_column_metrics()
         self._apply_styles()
         if SHOW_BANK_SETTINGS_CARD:
             self._refresh_pay_method_combo()
@@ -219,67 +223,81 @@ class MainWindow(QWidget):
         )
         return w
 
-    def _cost_stat_cell(self, label_text: str) -> tuple[QWidget, QLabel]:
-        """成本名称或合计：紫色标签 + 金额（summaryValue）+ 蓝色「元」。"""
-        # 与中部卡片「本月合计排款总额：」行一致：_lbl_purple_fixed 列宽 + _label_value_row(4)
-        # + _value_yuan_cell_wide 内金额与「元」spacing(2)；文案集合须与 _setup_ui 中 _sync_label_texts 一致。
-        _sync_label_texts = (
-            "严格按账期应付额：",
-            "第一优先级应付额：",
-            "第二优先级应付额：",
-            "本月合计应付总额：",
-            "本月可支付总额：",
-            "本月预留款总额：",
-            "第一优先级支付计划占应付额：",
-            "第二优先级支付计划占应付额：",
-            "本月合计排款总额：",
-            "严格按账期排款额：",
-            "第一优先级排款额：",
-            "第二优先级排款额：",
-        )
-        _lbl_font = QFont()
-        _lbl_font.setPointSize(Figma.LABEL_PT)
-        _fm_lbl = QFontMetrics(_lbl_font)
-        w_sync_label_col = max(_fm_lbl.horizontalAdvance(t) for t in _sync_label_texts)
+    # 卡片 3：标签 | 4px | 金额 | 2px | 「元」（四行共用列宽，查看排款后仍纵向对齐）
+    _OWNER_COST_GAP_LABEL_TO_AMOUNT = 4
+    _OWNER_COST_GAP_AMOUNT_TO_YUAN = 2
 
+    def _init_owner_cost_column_metrics(self) -> None:
+        amt_font = QFont()
+        amt_font.setPointSize(Figma.BODY_PT + 1)
+        amt_font.setBold(True)
+        fm_amt = QFontMetrics(amt_font)
+        self._owner_cost_amount_col_w = (
+            fm_amt.horizontalAdvance("999,999,999,999,999,999.99") + 4
+        )
+        self._owner_cost_yuan_col_w = max(fm_amt.horizontalAdvance("元"), 18)
+
+    def _ensure_owner_cost_label_col_w(self, cost_labels: tuple[str, ...]) -> None:
+        """按本批成本名称（及「合计」）统一标签列宽。"""
+        lbl_font = QFont()
+        lbl_font.setPointSize(Figma.LABEL_PT)
+        fm_lbl = QFontMetrics(lbl_font)
+        texts = [f"{t}：" for t in cost_labels] + ["合计："]
+        if not texts:
+            texts = ["合计："]
+        self._owner_cost_label_col_w = max(fm_lbl.horizontalAdvance(t) for t in texts) + 2
+
+    def _owner_cost_block_width(self) -> int:
+        return (
+            self._owner_cost_label_col_w
+            + self._OWNER_COST_GAP_LABEL_TO_AMOUNT
+            + self._owner_cost_amount_col_w
+            + self._OWNER_COST_GAP_AMOUNT_TO_YUAN
+            + self._owner_cost_yuan_col_w
+        )
+
+    def _cost_stat_cell(self, label_text: str) -> tuple[QWidget, QLabel]:
+        """成本名称或合计：固定列宽，标签/金额/「元」各行纵向对齐。"""
+        if self._owner_cost_amount_col_w <= 0:
+            self._init_owner_cost_column_metrics()
+        block_w = self._owner_cost_block_width()
         w = QWidget()
+        w.setFixedWidth(block_w)
         w.setSizePolicy(
-            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Preferred,
         )
         outer = QHBoxLayout(w)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(4)
+        outer.setSpacing(0)
+
         lbl = self._lbl_purple(label_text)
-        lbl.setFixedWidth(w_sync_label_col)
+        lbl.setFixedWidth(self._owner_cost_label_col_w)
         lbl.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         outer.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+        outer.addSpacing(self._OWNER_COST_GAP_LABEL_TO_AMOUNT)
 
-        inner = QWidget()
-        inner.setSizePolicy(
-            QSizePolicy.Policy.Maximum,
-            QSizePolicy.Policy.Preferred,
-        )
-        hh = QHBoxLayout(inner)
-        hh.setContentsMargins(0, 0, 0, 0)
-        hh.setSpacing(2)
         val = QLabel("")
         val.setObjectName("summaryValue")
-        val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        val.setWordWrap(True)
+        val.setFixedWidth(self._owner_cost_amount_col_w)
+        val.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         val.setSizePolicy(
-            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Preferred,
         )
-        hh.addWidget(val, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        hh.addWidget(
-            self._lbl_yuan_blue(),
-            0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        outer.addWidget(val, alignment=Qt.AlignmentFlag.AlignVCenter)
+        outer.addSpacing(self._OWNER_COST_GAP_AMOUNT_TO_YUAN)
+
+        yuan = self._lbl_yuan_blue()
+        yuan.setFixedWidth(self._owner_cost_yuan_col_w)
+        yuan.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        outer.addWidget(inner, alignment=Qt.AlignmentFlag.AlignVCenter)
+        outer.addWidget(yuan, alignment=Qt.AlignmentFlag.AlignVCenter)
         return w, val
 
     @staticmethod
@@ -299,11 +317,12 @@ class MainWindow(QWidget):
         cost_labels: tuple[str, ...] | None = None,
     ) -> None:
         """无汇总数据时占位；若提供 cost_labels 则与 Sheet4 顺序、标签一致。"""
-        layout.setSpacing(Figma.GAP_INLINE)
+        layout.setSpacing(Figma.DATA_ROW_GAP)
         z = _format_payable_amount(0.0)
         titles = cost_labels if cost_labels else ("成本二部", "成本三部")
         if not titles:
             titles = ("成本二部", "成本三部")
+        self._ensure_owner_cost_label_col_w(titles)
         for title in titles:
             cell, lbl = self._cost_stat_cell(f"{title}：")
             lbl.setText(z)
@@ -325,7 +344,8 @@ class MainWindow(QWidget):
         if stats is None:
             self._fill_cost_summary_row_static_zeros(layout, fallback_labels)
             return
-        layout.setSpacing(Figma.GAP_INLINE)
+        layout.setSpacing(Figma.DATA_ROW_GAP)
+        self._ensure_owner_cost_label_col_w(stats.cost_labels)
         if panel_mode == "zero":
             amounts = stats.per_owner_zero
             total_val = stats.sum_zero
@@ -492,7 +512,7 @@ class MainWindow(QWidget):
         _amt_font.setPointSize(m.BODY_PT + 1)
         _amt_font.setBold(True)
         _fm_amt = QFontMetrics(_amt_font)
-        _worst_amount = "9" * 18 + ".99"
+        _worst_amount = _format_payable_amount(999999999999999999.99)
         _w_num = _fm_amt.horizontalAdvance(_worst_amount)
         _w_yuan = max(_fm_amt.horizontalAdvance("元"), 18)
         _w_pct = max(_fm_amt.horizontalAdvance("%"), 14)
