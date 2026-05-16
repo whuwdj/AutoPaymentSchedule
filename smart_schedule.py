@@ -1,16 +1,27 @@
 # -*- coding: utf-8 -*-
 """
 智能排款：读取总表 Sheet1（程序目录 AutoPaymentScheduleFile/TotalSheet 下 Excel），
-初始化表后按付款优先级 0→1→2 依次处理；同档内再按 Sheet2「类别优先级」与 Sheet1「序号」排序，
-Sheet1 类别未在 Sheet2 出现的行排在同档末尾且顺序随机；尝试各「笔」列时仅调整遍历顺序（不改列位置）：
+初始化表后按付款优先级 0→1→2 依次处理；同档内按 Sheet2「类别优先级」+ Sheet2「序号」+ Sheet1「序号」排序，
+类别未匹配行排在同档末尾并按 Sheet1「序号」稳定排序；尝试各「笔」列时仅调整遍历顺序（不改列位置）：
 按 Sheet3 银行应付款/付款优先级数值升序，未配置银行排最后；账期与应收汇总、nPeriodPercent 着色、写回「笔」列与付款计划并扣减第 5 行排款余额。
-卡片汇总：严格按账期应付额为优先级 0 的 nPayablesSum 之和；第一、二优先级应付额为排款后「付款计划」列中对应付款优先级行的金额之和；本月合计为三者的和。
+
+核心计算（与业务规格一致，见 run_smart_schedule_on_total_sheet / _compute_ntotal_for_priority）：
+- 账期数 nPeriodCount = 协议账期÷30（_protocol_period_months）。
+- nPayablesSum：「当月已开票余额」列之后～「截止」列之前，表头 nMonth（「N个月」取 N）满足 nMonth≥nPeriodCount
+  的单元格数值之和（_sum_over_invoice_cutoff_window）；截止列及其右侧不参与。
+- 优先级 0：nTotalSum=nPayablesSum；上述区间内数值非空且>0 的格标浅绿（_highlight_priority0_month_window）。
+- 优先级 1/2：nTotalSum=nPayablesSum×(界面整数百分比÷100)；锚点为上述区间内自右向左最后一个数值非空列，
+  nPeriodPercent=(锚点值/nPayablesSum)×100，与 nPercentOne/nPercentTwo 比较后循环降月或分格渐变着色
+  （_compute_ntotal_priority12_with_highlights）。
+- 排款完成后卡片 2：严格按账期排款额=各优先级 0 行 nTotalSum 之和；第一/二优先级排款额=「付款计划」列中
+  该行「付款优先级」为 1/2 的金额之和；本月合计排款总额=三者之和（见 SmartScheduleResult）。
+
+上传总表后界面「应付额」四行可由 summarize_card1_payable_from_total_sheet 按账期窗口与行优先级预填。
 """
 
 from __future__ import annotations
 
 import math
-import random
 import re
 from collections import defaultdict
 from copy import copy
@@ -48,6 +59,16 @@ class SmartScheduleResult:
     priority0_total: float = 0.0
     priority1_total: float = 0.0
     priority2_total: float = 0.0
+
+
+@dataclass(frozen=True)
+class Card1PayableTotals:
+    """卡片 1 应付额：按账期窗口逐行汇总后按付款优先级 0/1/2 累计，及总应付 nCountTotal。"""
+
+    n_count0: float
+    n_count1: float
+    n_count2: float
+    n_count_total: float
 
 
 def _norm_h(text: str) -> str:
@@ -202,29 +223,38 @@ def _find_total_scheduled_col(ws: Worksheet, header_row: int) -> Optional[int]:
     return None
 
 
-def _find_sheet2_category_header_cols(ws: Worksheet) -> Optional[Tuple[int, int, int]]:
-    """定位 Sheet2 上「类别」「类别优先级」所在表头行及列号（1-based）。"""
+def _find_sheet2_category_header_cols(
+    ws: Worksheet,
+) -> Optional[Tuple[int, int, int, Optional[int]]]:
+    """定位 Sheet2 上「类别」「类别优先级」及可选「序号」所在表头行及列号（1-based）。"""
     max_r = min(ws.max_row or 0, 15)
     max_c = min(ws.max_column or 0, 80)
     for r in range(1, max_r + 1):
         c_cat: Optional[int] = None
         c_pri: Optional[int] = None
+        c_seq: Optional[int] = None
         for c in range(1, max_c + 1):
             h = _norm_h(ws.cell(row=r, column=c).value)
             if h == "类别":
                 c_cat = c
             elif h == "类别优先级":
                 c_pri = c
+            elif h == "序号":
+                c_seq = c
         if c_cat is not None and c_pri is not None:
-            return r, c_cat, c_pri
+            return r, c_cat, c_pri, c_seq
     return None
 
 
 def _load_category_priority_map(
-    ws: Worksheet, header_row: int, c_cat: int, c_pri: int
-) -> Dict[str, float]:
-    """Sheet2：类别（与 Sheet1 同一套取值）→ 类别优先级；同一类别多行时取首次出现的优先级。"""
-    m: Dict[str, float] = {}
+    ws: Worksheet,
+    header_row: int,
+    c_cat: int,
+    c_pri: int,
+    c_sheet2_seq: Optional[int],
+) -> Dict[str, Tuple[float, int]]:
+    """Sheet2：类别 →（类别优先级, Sheet2 序号）；同一类别多行取首次出现行；无「序号」列时序号为 0。"""
+    m: Dict[str, Tuple[float, int]] = {}
     for r in range(header_row + 1, (ws.max_row or 0) + 1):
         k = _cell_text_normalized(ws.cell(row=r, column=c_cat).value)
         if not k:
@@ -234,7 +264,12 @@ def _load_category_priority_map(
         pv = _coerce_numeric_for_sum(ws.cell(row=r, column=c_pri).value)
         if pv is None:
             continue
-        m[k] = float(pv)
+        seq_i = 0
+        if c_sheet2_seq is not None:
+            sv = _coerce_numeric_for_sum(ws.cell(row=r, column=c_sheet2_seq).value)
+            if sv is not None:
+                seq_i = int(round(float(sv)))
+        m[k] = (float(pv), seq_i)
     return m
 
 
@@ -255,25 +290,31 @@ def _order_candidates_by_category_within_priority(
     base: List[Tuple[int, int]],
     c_category: int,
     c_serial: Optional[int],
-    cat_map: Dict[str, float],
+    cat_map: Dict[str, Tuple[float, int]],
 ) -> List[Tuple[int, int]]:
     """
-    保持付款优先级 0→1→2 分段；每段内：先按 Sheet2 类别优先级升序、再按 Sheet1 序号升序；
-    类别为空或不在 Sheet2 的行排在同段已匹配行之后，彼此之间随机顺序。
+    保持付款优先级 0→1→2 分段；每段内：Sheet2 类别优先级 → Sheet2 序号 → Sheet1 序号 → 行号；
+    类别为空或不在 Sheet2 的行排在同段末尾，按 Sheet1 序号 → 行号稳定排序。
     """
-    by_pl: Dict[int, List[Tuple[int, int, Optional[float], int]]] = defaultdict(list)
+    by_pl: Dict[int, List[Tuple[int, int, Optional[float], int, int]]] = defaultdict(
+        list
+    )
     for r, pl in base:
         cat_k = _cell_text_normalized(ws.cell(row=r, column=c_category).value)
-        pcat: Optional[float] = cat_map.get(cat_k) if cat_k else None
+        entry = cat_map.get(cat_k) if cat_k else None
+        pcat: Optional[float] = None
+        pseq2 = 0
+        if entry is not None:
+            pcat, pseq2 = entry[0], entry[1]
         ser = _sheet1_serial_sort_key(ws, r, c_serial)
-        by_pl[pl].append((r, pl, pcat, ser))
+        by_pl[pl].append((r, pl, pcat, pseq2, ser))
     out: List[Tuple[int, int]] = []
     for pl in (0, 1, 2):
         bucket = by_pl.get(pl, [])
         matched = [t for t in bucket if t[2] is not None]
         unmatched = [t for t in bucket if t[2] is None]
-        matched.sort(key=lambda t: (t[2], t[3], t[0]))
-        random.shuffle(unmatched)
+        matched.sort(key=lambda t: (t[2], t[3], t[4], t[0]))
+        unmatched.sort(key=lambda t: (t[4], t[0]))
         for t in matched + unmatched:
             out.append((t[0], t[1]))
     return out
@@ -342,7 +383,8 @@ def _sum_over_invoice_cutoff_window(
     min_month_threshold: float,
 ) -> float:
     """
-    对「当月已开票余额」列之后～「截止」列之前：表头月份桶 mn ≥ min_month_threshold 的单元格求和。
+    步骤 2～3：对「当月已开票余额」列之后～「截止」列之前各列，读表头得 nMonth；
+    仅当 nMonth 可解析且 nMonth ≥ min_month_threshold 时，将本行该列数值计入和（截止列及右侧不参与）。
     """
     total = 0.0
     for c in range(c_invoice + 1, c_cutoff):
@@ -518,7 +560,8 @@ def _highlight_priority0_month_window(
     n_period: float,
 ) -> None:
     """
-    优先级 0：仅表头 mn≥nPeriodCount 的列；本行单元格解析为有限数且 >0 则标浅绿。
+    优先级 0：表头 mn≥nPeriodCount 的列（「当月已开票余额」与「截止」之间），
+    本行单元格解析为有限数且 >0 则整格浅绿（截止列及其右侧不参与）。
     """
     qual = _cols_qualifying_month(ws, header_row, r, c_invoice, c_cutoff, n_period)
     for c in qual:
@@ -591,10 +634,20 @@ def _compute_ntotal_priority12_with_highlights(
     thr_pct: float,
 ) -> float:
     """
-    优先级 1/2：nTotalSum = nPayablesSum * thr_pct / 100（nPayablesSum 为 mn≥nPeriodCount 区间内数值和）。
-    起点 nPeriodPercent = 锚点格 nMonthValue / nPayablesSum * 100；递减循环内
-    nPeriodPercent =（该列及右侧可解析数值之和）/ nPayablesSum * 100。
-    锚点为 mn≥nPeriodCount 区间内自右向左最后一个数值非空列；与 thr_pct（界面整数百分数）比较后标浅绿。
+    优先级 1 或 2 行：nTotalSum = nPayablesSum × (thr_pct/100)（thr_pct 即界面 nPercentOne 或 nPercentTwo）。
+
+    nPayablesSum 定义同 _sum_over_invoice_cutoff_window。锚点：mn≥nPeriodCount 的遍历区间内，
+    自右向左最后一个可解析为数值的非空列；nPeriodPercent = (该列单元格数值 / nPayablesSum) × 100。
+
+    - 若 nPeriodPercent == thr_pct：从该列起至截止列前，遍历范围内数值非空且>0 的格整格浅绿（_highlight_equal_band）。
+    - 若 nPeriodPercent < thr_pct：按表头月份减 1 向左换列，nPeriodPercent 改为（该列及右侧数值之和
+      / nPayablesSum）×100，循环直至 nPeriodPercent≥thr_pct 或无法再降月。
+      若最终等于阈值则整段浅绿；若大于阈值则走「大于」分支。
+    - 若 nPeriodPercent > thr_pct：（nMonth+1）月列及其右侧遍历范围内数值非空且>0 的格整格浅绿；
+      当前 nMonth 列按 (单元格数值 − nPayablesSum×(nPeriodPercent−thr_pct)/100) / 单元格数值 作为
+      从右向左的浅绿占比，做分格渐变（_highlight_greater_band / _fill_partial_light_green_from_right）。
+
+    约定：锚点列上初始 nPeriodPercent 不大于阈值的典型数据；若数据导致首算即大于阈值，仍按「大于」分支着色。
     """
     n_payables = _sum_over_invoice_cutoff_window(
         ws, header_row, r, c_invoice, c_cutoff, n_period
@@ -684,12 +737,11 @@ def _compute_ntotal_for_priority(
     priority2_plan_pct: float,
 ) -> float:
     """
-    计算本行 nTotalSum（供排款列写入与余额扣减使用）。
+    计算本行 nTotalSum（写入「笔」列与付款计划、扣减排款余额用）。
 
-    priority 0：nTotalSum = nPayablesSum；仅表头 mn≥nPeriodCount 的列中，
-    凡解析为 >0 的格标浅绿（见 _highlight_priority0_month_window）。
-    priority 1/2：nTotalSum = nPayablesSum *（界面整数百分数）/ 100；着色规则见
-    _compute_ntotal_priority12_with_highlights。
+    - 优先级 0：nTotalSum = nPayablesSum；并对 mn≥nPeriodCount 至截止列前、本行数值非空且>0 的格标浅绿。
+    - 优先级 1：nTotalSum = nPayablesSum × (priority1_plan_pct/100)；着色见 _compute_ntotal_priority12_with_highlights（nPercentOne）。
+    - 优先级 2：nTotalSum = nPayablesSum × (priority2_plan_pct/100)；同上（nPercentTwo）。
     """
     if priority_level == 0:
         n_payables = _sum_over_invoice_cutoff_window(
@@ -717,6 +769,80 @@ def _protocol_period_months(value: object) -> Optional[float]:
     if n is None or n <= 0:
         return None
     return n / 30.0
+
+
+def summarize_card1_payable_from_total_sheet(path: str) -> Optional[Card1PayableTotals]:
+    """
+    从 TotalSheet 总表 Sheet1 汇总卡片 1 应付额（仅 .xlsx）。与下列步骤一致：
+
+    1. 数据区间：表头行定位后，列范围为「当月已开票余额」列之后至「截止」列之前；截止列及右侧不参与。
+    2. 表头各列解析月份数 nMonth（「N个月」取 N；「年以上」等见 _month_bucket_n）。
+    3. 行内 nPeriodCount = 协议账期÷30；仅保留 nMonth ≥ nPeriodCount 的列参与本行求和。
+    4. 对每一行在上述列上单元格数值求和 → 该行应付总额（_sum_over_invoice_cutoff_window）。
+    5. 按行「付款优先级」0、1、2 分别累加各行应付总额 → nCount0、nCount1、nCount2。
+    6. nCountTotal = nCount0 + nCount1 + nCount2。
+    7. 供界面展示：严格按账期应付额、第一/二优先级应付额、本月合计应付总额。
+
+    行筛选：非空主体且付款优先级为 0/1/2（与智能排款入口一致）；协议账期无法解析则跳过该行。
+    """
+    if _is_xls(path):
+        return None
+    wb = None
+    try:
+        wb = load_workbook(path, read_only=False, data_only=True)
+        ws = wb.worksheets[0]
+        header_row = _find_sheet1_header_row(ws)
+        if header_row is None:
+            return None
+        c_subject = _find_col_by_exact(ws, header_row, "主体")
+        c_agreement = _find_col_by_exact(ws, header_row, "协议账期")
+        c_invoice = _find_invoice_balance_col(ws, header_row)
+        c_cutoff = _find_cutoff_col(ws, header_row)
+        c_priority = _find_col_header_contains(ws, header_row, "付款优先级")
+        if (
+            c_subject is None
+            or c_agreement is None
+            or c_invoice is None
+            or c_cutoff is None
+            or c_priority is None
+        ):
+            return None
+        if c_invoice >= c_cutoff:
+            return None
+        max_r = ws.max_row or 0
+        n0 = 0.0
+        n1 = 0.0
+        n2 = 0.0
+        for r in range(header_row + 1, max_r + 1):
+            pl = _priority_level_0_2(ws.cell(row=r, column=c_priority).value)
+            if pl is None:
+                continue
+            subj = _cell_text_normalized(ws.cell(row=r, column=c_subject).value)
+            if not subj:
+                continue
+            n_period = _protocol_period_months(ws.cell(row=r, column=c_agreement).value)
+            if n_period is None:
+                continue
+            row_sum = float(
+                _sum_over_invoice_cutoff_window(
+                    ws, header_row, r, c_invoice, c_cutoff, n_period
+                )
+            )
+            if pl == 0:
+                n0 += row_sum
+            elif pl == 1:
+                n1 += row_sum
+            elif pl == 2:
+                n2 += row_sum
+        nt = n0 + n1 + n2
+        return Card1PayableTotals(
+            n_count0=n0, n_count1=n1, n_count2=n2, n_count_total=nt
+        )
+    except Exception:
+        return None
+    finally:
+        if wb is not None:
+            wb.close()
 
 
 def _split_tokens(s: str) -> List[str]:
@@ -910,13 +1036,18 @@ def _prepare_sheet_three_steps(
     c_payment_plan: int,
     c_total_sched: int,
 ) -> None:
-    """智能排款前：清空付款计划列、清空第 1 行「排款计划」列区第 9 行起、第 4 行横向区复制到第 5 行。"""
+    """智能排款前：第 9 行起清空「付款计划」～「合计已排款」矩形区；清空第 1 行「排款计划」列区第 9 行起；第 4 行横向区复制到第 5 行。
+    nPayablesSum 为行内重算，无跨行缓存；清空填写区后不从旧格累加。"""
     max_r = ws.max_row or 0
     if max_r <= 0:
         return
 
-    for r in range(header_row + 1, max_r + 1):
-        _clear_cell_if_writable(ws, r, c_payment_plan)
+    c_blk_lo = min(c_payment_plan, c_total_sched)
+    c_blk_hi = max(c_payment_plan, c_total_sched)
+    if max_r >= 9:
+        for r in range(9, max_r + 1):
+            for c in range(c_blk_lo, c_blk_hi + 1):
+                _clear_cell_if_writable(ws, r, c)
 
     span = _find_row1_schedule_plan_column_span(ws)
     if span is not None:
@@ -946,13 +1077,19 @@ def run_smart_schedule_on_total_sheet(
     priority2_plan_pct: float,
 ) -> SmartScheduleResult:
     """
-    在排款计划总表 Sheet1 上执行智能排款：表初始化后按优先级 0、1、2 顺序处理各行；
-    同档内按 Sheet2 类别优先级与 Sheet1 序号排序（类别未对照到的行在同档末尾随机顺序）；
-    匹配各「笔」列时按 Sheet3 银行优先级数值升序遍历列（仅处理顺序，不改表结构；未配置银行排最后）。
-    优先级 0：nTotalSum = nPayablesSum；仅 mn≥nPeriod 的账龄列中本行数值 >0 的格标浅绿。
-    优先级 1、2：nTotalSum = nPayablesSum×界面整数百分数/100；nPeriodPercent 锚点与递减、分格着色规则见 _compute_ntotal_priority12_with_highlights。
-    排款结束后：卡片第一、二优先级应付额 =「付款计划」列中付款优先级分别为 1、2 的行金额之和；严格按账期应付额仍为各优先级 0 行 nPayablesSum 之和；本月合计为三者之和。
-    仅支持 .xlsx。
+    在排款计划总表 Sheet1 上执行智能排款（仅 .xlsx）。
+
+    与界面「第一/二优先级支付计划占应付额」整数百分比（0～100）对应：程序内以
+    priority1_plan_pct / priority2_plan_pct 作为 nPercentOne / nPercentTwo（除以 100 后乘 nPayablesSum）。
+
+    每行 nTotalSum 与着色由 _compute_ntotal_for_priority 实现；写「笔」列与付款计划、扣排款余额后，
+    SmartScheduleResult：priority0_total 为所有付款优先级=0 行的 nTotalSum 之和（严格按账期排款额）；
+    priority1_total / priority2_total 为表头行以下「付款计划」列中该行「付款优先级」为 1/2 的数值之和；
+    界面「本月合计排款总额」= 三者之和（main 中 lbl_total_payable_value）。
+
+    表内排序与列匹配逻辑：表初始化后按优先级 0、1、2 顺序处理各行；同档内按 Sheet2「类别优先级」、
+    Sheet2「序号」（表头含「序号」列时）、Sheet1「序号」稳定排序；类别未匹配行在同档末尾按 Sheet1「序号」
+    稳定排序；各「笔」列按 Sheet3 银行优先级数值升序遍历。
     """
     if _is_xls(path):
         raise ValueError("智能排款仅支持 .xlsx 格式的排款计划总表。")
@@ -1007,8 +1144,10 @@ def run_smart_schedule_on_total_sheet(
         sheet2_cat = _find_sheet2_category_header_cols(ws2)
         if sheet2_cat is None:
             raise ValueError("未在 Sheet2 表头区域找到「类别」与「类别优先级」列。")
-        h2_cat, c2_cat_col, c2_pri_col = sheet2_cat
-        cat_map = _load_category_priority_map(ws2, h2_cat, c2_cat_col, c2_pri_col)
+        h2_cat, c2_cat_col, c2_pri_col, c2_seq_col = sheet2_cat
+        cat_map = _load_category_priority_map(
+            ws2, h2_cat, c2_cat_col, c2_pri_col, c2_seq_col
+        )
 
         if len(wb.worksheets) < 3:
             raise ValueError(

@@ -3,6 +3,10 @@
 智能排款：上传总表/明细模板、总表按优先级 0→1→2 排款、从 Sheet2 读取银行、写入可支付金额与付款方式。
 工作区：程序目录\\AutoPaymentScheduleFile（TotalSheet / DetailTemplate）。
 
+启动时：清空 TotalSheet、DetailTemplate 目录内容，界面数值归零（不读总表）。
+上传总表保存到 TotalSheet 后，自动读取该目录下 Excel，按 summarize_card1_payable_from_total_sheet
+汇总卡片 1 应付四行；展示完成后 nCount0/1/2/Total 内存变量清零（界面不变）。卡片 2 排款额仅智能排款后更新。
+
 界面布局与色值对齐 Figma「智能排款界面」：
 https://www.figma.com/design/aabHTb8OZnSlJBQPKrNhrZ/%E6%99BA%E8%83%BD%E6%8E%92%E6%AC%BE%E7%95%8C%E9%9D%A2?node-id=0-1
 """
@@ -30,6 +34,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStyle,
     QVBoxLayout,
@@ -48,15 +53,25 @@ from excel_service import (
     sum_sheet1_row4_after_payout_through_total_scheduled,
     write_bank_config_xlsx,
 )
-from owner_section_stats import OwnerCostPanelStats, load_owner_cost_panel_stats
+from owner_section_stats import (
+    OwnerCostPanelStats,
+    load_owner_cost_panel_stats,
+    load_sheet4_cost_display_labels,
+    sheet1_payment_plan_has_numeric_entries,
+)
 from paths import (
+    clear_workspace_upload_dirs,
     detail_template_dir,
     ensure_workspace,
     get_base_dir,
     get_program_dir,
     total_sheet_dir,
 )
-from smart_schedule import SmartScheduleResult, run_smart_schedule_on_total_sheet
+from smart_schedule import (
+    SmartScheduleResult,
+    run_smart_schedule_on_total_sheet,
+    summarize_card1_payable_from_total_sheet,
+)
 
 _EXCEL_SUFFIXES = (".xlsx", ".xls")
 
@@ -99,8 +114,8 @@ def _format_payable_amount(n: float) -> str:
     return f"{n:.2f}"
 
 
-# 付款方式下拉选项（启动时清空后重新加载）
-PAY_METHOD_CHOICES = ("不限", "电汇", "支票", "承兑汇票", "现金")
+# 「查看排款」前置：本会话未完成智能排款，或付款计划列无可解析数值（视为空）
+_VIEW_SCHEDULE_PREREQ_MSG = "请先点击「智能排款」按钮进行排款。"
 
 # 为 False 时不创建「银行可支付金额及付款方式」卡片，智能排款卡片上移为第二块
 SHOW_BANK_SETTINGS_CARD = False
@@ -128,39 +143,53 @@ class MainWindow(QWidget):
         self._sheet1_strip_arrays: dict[str, list[str]] = {
             k: [] for k in SHEET1_SUMMARY_LABELS
         }
+        # 卡片 1 应付汇总内存值（与界面 lbl_due_* 独立；展示后清零，避免下次计算累加旧值）
+        self._n_count0 = 0.0
+        self._n_count1 = 0.0
+        self._n_count2 = 0.0
+        self._n_count_total = 0.0
+        self._smart_schedule_completed_ok = False
+        self._initialize_program()
         self._setup_ui()
         self._apply_styles()
         if SHOW_BANK_SETTINGS_CARD:
             self._refresh_pay_method_combo()
             self._refresh_bank_combo()
-        else:
-            ensure_workspace()
         self._clear_startup_numeric_fields()
-        ensure_workspace()
-        latest = find_latest_total_excel(total_sheet_dir())
-        if latest:
-            self._apply_payable_total_from_sheet(latest)
-            if not SHOW_BANK_SETTINGS_CARD:
-                self._total_path = latest
-                self._rebuild_sheet1_strip_cache(self._total_path)
-        else:
-            if not SHOW_BANK_SETTINGS_CARD:
-                self._total_path = None
-                self._rebuild_sheet1_strip_cache(None)
+        self._reset_card1_payable_count_vars()
+        self._total_path = None
+        if not SHOW_BANK_SETTINGS_CARD:
+            self._rebuild_sheet1_strip_cache(None)
         self._refresh_owner_cost_panels(None)
+
+    def _initialize_program(self) -> None:
+        """程序启动：创建工作区并清空 TotalSheet、DetailTemplate（不读取总表）。"""
+        ensure_workspace()
+        clear_workspace_upload_dirs()
 
     def _clear_startup_numeric_fields(self) -> None:
         z = _format_payable_amount(0.0)
+        self.lbl_due_strict.setText(z)
+        self.lbl_due_priority1.setText(z)
+        self.lbl_due_priority2.setText(z)
+        self.lbl_due_month_total.setText(z)
         self.lbl_payable_total_value.setText(z)
         self.lbl_reserved_total_value.setText(z)
-        self.lbl_total_payable_value.setText(z)
-        self.lbl_strict_payable_value.setText(z)
-        self.lbl_priority1_payable_value.setText(z)
-        self.lbl_priority2_payable_value.setText(z)
+        self.lbl_sched_month_total.setText(z)
+        self.lbl_sched_strict.setText(z)
+        self.lbl_sched_priority1.setText(z)
+        self.lbl_sched_priority2.setText(z)
         self.edit_priority1_pct.clear()
         self.edit_priority2_pct.clear()
         if SHOW_BANK_SETTINGS_CARD:
             self.edit_amount.setText(z)
+
+    def _reset_card1_payable_count_vars(self) -> None:
+        """nCount0/1/2/Total 内存变量清零（不改卡片 1 界面显示）。"""
+        self._n_count0 = 0.0
+        self._n_count1 = 0.0
+        self._n_count2 = 0.0
+        self._n_count_total = 0.0
 
     @staticmethod
     def _lbl_purple(text: str) -> QLabel:
@@ -184,24 +213,73 @@ class MainWindow(QWidget):
     def _lbl_section_title(text: str) -> QLabel:
         w = QLabel(text)
         w.setObjectName("figmaSectionTitle")
+        w.setWordWrap(True)
+        w.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         return w
 
     def _cost_stat_cell(self, label_text: str) -> tuple[QWidget, QLabel]:
         """成本名称或合计：紫色标签 + 金额（summaryValue）+ 蓝色「元」。"""
-        m = Figma
+        # 与中部卡片「本月合计排款总额：」行一致：_lbl_purple_fixed 列宽 + _label_value_row(4)
+        # + _value_yuan_cell_wide 内金额与「元」spacing(2)；文案集合须与 _setup_ui 中 _sync_label_texts 一致。
+        _sync_label_texts = (
+            "严格按账期应付额：",
+            "第一优先级应付额：",
+            "第二优先级应付额：",
+            "本月合计应付总额：",
+            "本月可支付总额：",
+            "本月预留款总额：",
+            "第一优先级支付计划占应付额：",
+            "第二优先级支付计划占应付额：",
+            "本月合计排款总额：",
+            "严格按账期排款额：",
+            "第一优先级排款额：",
+            "第二优先级排款额：",
+        )
+        _lbl_font = QFont()
+        _lbl_font.setPointSize(Figma.LABEL_PT)
+        _fm_lbl = QFontMetrics(_lbl_font)
+        w_sync_label_col = max(_fm_lbl.horizontalAdvance(t) for t in _sync_label_texts)
+
         w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(0)
-        h.addWidget(self._lbl_purple(label_text))
-        h.addSpacing(m.GAP_TIGHT)
+        w.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
+        outer = QHBoxLayout(w)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+        lbl = self._lbl_purple(label_text)
+        lbl.setFixedWidth(w_sync_label_col)
+        lbl.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        outer.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        inner = QWidget()
+        inner.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
+        hh = QHBoxLayout(inner)
+        hh.setContentsMargins(0, 0, 0, 0)
+        hh.setSpacing(2)
         val = QLabel("")
         val.setObjectName("summaryValue")
         val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        h.addWidget(val)
-        h.addSpacing(m.GAP_TIGHT)
-        h.addWidget(self._lbl_yuan_blue())
-        h.addStretch(0)
+        val.setWordWrap(True)
+        val.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
+        hh.addWidget(val, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        hh.addWidget(
+            self._lbl_yuan_blue(),
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+        outer.addWidget(inner, alignment=Qt.AlignmentFlag.AlignVCenter)
         return w, val
 
     @staticmethod
@@ -215,46 +293,99 @@ class MainWindow(QWidget):
                 w.deleteLater()
             sip.delete(item)
 
-    def _fill_cost_summary_row_static_zeros(self, layout: QHBoxLayout) -> None:
-        """第二卡片：无有效汇总数据时，与 Figma 一致展示三块金额，均为 0.00。"""
+    def _fill_cost_summary_row_static_zeros(
+        self,
+        layout: QHBoxLayout,
+        cost_labels: tuple[str, ...] | None = None,
+    ) -> None:
+        """无汇总数据时占位；若提供 cost_labels 则与 Sheet4 顺序、标签一致。"""
+        layout.setSpacing(Figma.GAP_INLINE)
         z = _format_payable_amount(0.0)
-        for title in ("成本二部", "成本三部"):
+        titles = cost_labels if cost_labels else ("成本二部", "成本三部")
+        if not titles:
+            titles = ("成本二部", "成本三部")
+        for title in titles:
             cell, lbl = self._cost_stat_cell(f"{title}：")
             lbl.setText(z)
-            layout.addWidget(cell, 1)
+            layout.addWidget(cell, 0)
         tot_w, tot_lbl = self._cost_stat_cell("合计：")
         tot_lbl.setText(z)
-        layout.addWidget(tot_w, 1)
+        layout.addWidget(tot_w, 0)
+        layout.addStretch(1)
 
     def _fill_cost_summary_row(
         self,
         layout: QHBoxLayout,
         stats,
         *,
-        use_priority_zero: bool,
+        panel_mode: str,
+        fallback_labels: tuple[str, ...] | None = None,
     ) -> None:
-        """在已清空的 layout 上填充一行（不再清空，由 _refresh_owner_cost_panels 统一清空）。"""
+        """panel_mode: zero | priority1 | priority2 | all"""
         if stats is None:
-            self._fill_cost_summary_row_static_zeros(layout)
+            self._fill_cost_summary_row_static_zeros(layout, fallback_labels)
             return
-        amounts = stats.per_owner_zero if use_priority_zero else stats.per_owner_all
-        total_val = stats.sum_zero if use_priority_zero else stats.sum_all
+        layout.setSpacing(Figma.GAP_INLINE)
+        if panel_mode == "zero":
+            amounts = stats.per_owner_zero
+            total_val = stats.sum_zero
+        elif panel_mode == "priority1":
+            amounts = stats.per_owner_priority1
+            total_val = stats.sum_priority1
+        elif panel_mode == "priority2":
+            amounts = stats.per_owner_priority2
+            total_val = stats.sum_priority2
+        else:
+            amounts = stats.per_owner_all
+            total_val = stats.sum_all
         for title, amt in zip(stats.cost_labels, amounts):
             cell, lbl = self._cost_stat_cell(f"{title}：")
             lbl.setText(_format_payable_amount(amt))
-            layout.addWidget(cell, 1)
+            layout.addWidget(cell, 0)
         tot_w, tot_lbl = self._cost_stat_cell("合计：")
         tot_lbl.setText(_format_payable_amount(total_val))
-        layout.addWidget(tot_w, 1)
+        layout.addWidget(tot_w, 0)
+        layout.addStretch(1)
+
+    def _refresh_owner_bottom_placeholder_from_path(self, path: str) -> None:
+        """付款计划为空等：底部四行仅按 Sheet4 标签填 0.00，不汇总 Sheet1。"""
+        fb = None
+        if path and os.path.isfile(path) and str(path).lower().endswith(".xlsx"):
+            try:
+                fb = load_sheet4_cost_display_labels(path)
+            except Exception:
+                traceback.print_exc()
+        self._clear_hbox_layout(self._lay_strict_cost_row)
+        self._clear_hbox_layout(self._lay_priority1_cost_row)
+        self._clear_hbox_layout(self._lay_priority2_cost_row)
+        self._clear_hbox_layout(self._lay_overall_cost_row)
+        self._fill_cost_summary_row(
+            self._lay_strict_cost_row, None, panel_mode="zero", fallback_labels=fb
+        )
+        self._fill_cost_summary_row(
+            self._lay_priority1_cost_row, None, panel_mode="priority1", fallback_labels=fb
+        )
+        self._fill_cost_summary_row(
+            self._lay_priority2_cost_row, None, panel_mode="priority2", fallback_labels=fb
+        )
+        self._fill_cost_summary_row(
+            self._lay_overall_cost_row, None, panel_mode="all", fallback_labels=fb
+        )
 
     def _refresh_owner_cost_panels(self, path: str | None) -> OwnerCostPanelStats | None:
-        """严格按账期 / 本月应付款 两行；path 为 None 时置为 0.00 占位。
-
-        有有效 .xlsx 总表时：从 Sheet4 顺序 + Sheet1「付款计划」汇总，
-        上行回填各成本 nCountZero* 与合计，下行 nCountAll* 与合计（见 owner_section_stats）。
-        返回本次统计对象；失败或无效 path 时返回 None。"""
+        """底部卡片 3 四行各部门明细；path 为 None 时占位 0.00。返回统计对象（供调用方扩展用）。"""
         self._clear_hbox_layout(self._lay_strict_cost_row)
+        self._clear_hbox_layout(self._lay_priority1_cost_row)
+        self._clear_hbox_layout(self._lay_priority2_cost_row)
         self._clear_hbox_layout(self._lay_overall_cost_row)
+
+        fallback_labels: tuple[str, ...] | None = None
+        if path and os.path.isfile(path) and str(path).lower().endswith(".xlsx"):
+            try:
+                fallback_labels = load_sheet4_cost_display_labels(path)
+            except Exception:
+                traceback.print_exc()
+                fallback_labels = None
 
         if (
             not path
@@ -262,10 +393,28 @@ class MainWindow(QWidget):
             or not str(path).lower().endswith(".xlsx")
         ):
             self._fill_cost_summary_row(
-                self._lay_strict_cost_row, None, use_priority_zero=True
+                self._lay_strict_cost_row,
+                None,
+                panel_mode="zero",
+                fallback_labels=fallback_labels,
             )
             self._fill_cost_summary_row(
-                self._lay_overall_cost_row, None, use_priority_zero=False
+                self._lay_priority1_cost_row,
+                None,
+                panel_mode="priority1",
+                fallback_labels=fallback_labels,
+            )
+            self._fill_cost_summary_row(
+                self._lay_priority2_cost_row,
+                None,
+                panel_mode="priority2",
+                fallback_labels=fallback_labels,
+            )
+            self._fill_cost_summary_row(
+                self._lay_overall_cost_row,
+                None,
+                panel_mode="all",
+                fallback_labels=fallback_labels,
             )
             return None
         try:
@@ -274,10 +423,28 @@ class MainWindow(QWidget):
             traceback.print_exc()
             stats = None
         self._fill_cost_summary_row(
-            self._lay_strict_cost_row, stats, use_priority_zero=True
+            self._lay_strict_cost_row,
+            stats,
+            panel_mode="zero",
+            fallback_labels=fallback_labels,
         )
         self._fill_cost_summary_row(
-            self._lay_overall_cost_row, stats, use_priority_zero=False
+            self._lay_priority1_cost_row,
+            stats,
+            panel_mode="priority1",
+            fallback_labels=fallback_labels,
+        )
+        self._fill_cost_summary_row(
+            self._lay_priority2_cost_row,
+            stats,
+            panel_mode="priority2",
+            fallback_labels=fallback_labels,
+        )
+        self._fill_cost_summary_row(
+            self._lay_overall_cost_row,
+            stats,
+            panel_mode="all",
+            fallback_labels=fallback_labels,
         )
         return stats
 
@@ -293,36 +460,34 @@ class MainWindow(QWidget):
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("智能排款")
-        self.setMinimumSize(1400, 600)
+        self.setMinimumSize(900, 480)
         self.setWindowIcon(_load_window_icon())
 
         m = Figma
         root = QVBoxLayout(self)
-        root.setContentsMargins(m.PAGE_MARGIN_H, m.PAGE_MARGIN_V, m.PAGE_MARGIN_H, m.PAGE_MARGIN_V)
-        root.setSpacing(m.GAP_SECTION)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # —— 卡片 1：与 figma-smart-payment-ui.html 一致 ——
-        card_top = QFrame()
-        card_top.setObjectName("elevatedCard")
-        card_top.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        lay_top = QVBoxLayout(card_top)
-        lay_top.setContentsMargins(m.CARD_PAD_H, m.CARD_PAD_V, m.CARD_PAD_H, m.CARD_PAD_V)
-        lay_top.setSpacing(m.ROW_GAP)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
-        row_upload = QHBoxLayout()
-        row_upload.setSpacing(m.GAP_INLINE)
-        self.btn_upload_total = QPushButton("上传排款计划总表")
-        self.btn_upload_total.setObjectName("figmaUploadBtn")
-        self.btn_upload_total.clicked.connect(self._on_upload_total)
-        self.btn_upload_template = QPushButton("上传排款明细模版")
-        self.btn_upload_template.setObjectName("figmaUploadBtn")
-        self.btn_upload_template.clicked.connect(self._on_upload_template)
-        row_upload.addWidget(self.btn_upload_total)
-        row_upload.addWidget(self.btn_upload_template)
-        row_upload.addStretch(1)
-        lay_top.addLayout(row_upload)
+        scroll_inner = QWidget()
+        scroll_layout = QVBoxLayout(scroll_inner)
+        scroll_layout.setContentsMargins(
+            m.PAGE_MARGIN_H, m.PAGE_MARGIN_V, m.PAGE_MARGIN_H, m.PAGE_MARGIN_V
+        )
+        scroll_layout.setSpacing(m.GAP_SECTION)
 
-        # 按 summaryValue 字体测算最宽金额 +「元」，保证不被遮挡；左列「元/%」同宽垂线对齐
+        scroll.setWidget(scroll_inner)
+        root.addWidget(scroll, 1)
+
+        # —— 共享：金额列宽度（顶部应付卡片 + 中部表单）——
         _amt_font = QFont()
         _amt_font.setPointSize(m.BODY_PT + 1)
         _amt_font.setBold(True)
@@ -343,6 +508,10 @@ class MainWindow(QWidget):
             _w_num + w_right_gap + _w_yuan + _pad,
         )
 
+        _lbl_font = QFont()
+        _lbl_font.setPointSize(m.LABEL_PT)
+        _fm_lbl = QFontMetrics(_lbl_font)
+
         def _value_yuan_cell(value_lbl: QLabel) -> QWidget:
             cell = QWidget()
             cell.setFixedWidth(w_left_tail)
@@ -350,8 +519,8 @@ class MainWindow(QWidget):
             hh = QHBoxLayout(cell)
             hh.setContentsMargins(0, 0, 0, 0)
             hh.setSpacing(2)
-            hh.addWidget(value_lbl)
-            hh.addWidget(self._suffix_unit("元"))
+            hh.addWidget(value_lbl, 0, Qt.AlignmentFlag.AlignLeft)
+            hh.addWidget(self._lbl_yuan_blue(), 0, Qt.AlignmentFlag.AlignLeft)
             return cell
 
         def _value_yuan_cell_wide(value_lbl: QLabel) -> QWidget:
@@ -361,8 +530,8 @@ class MainWindow(QWidget):
             hh = QHBoxLayout(cell)
             hh.setContentsMargins(0, 0, 0, 0)
             hh.setSpacing(2)
-            hh.addWidget(value_lbl)
-            hh.addWidget(self._suffix_unit("元"))
+            hh.addWidget(value_lbl, 0, Qt.AlignmentFlag.AlignLeft)
+            hh.addWidget(self._lbl_yuan_blue(), 0, Qt.AlignmentFlag.AlignLeft)
             return cell
 
         def _pct_tail_widget(edit: QLineEdit) -> QWidget:
@@ -375,31 +544,130 @@ class MainWindow(QWidget):
             hh.addWidget(edit, alignment=Qt.AlignmentFlag.AlignVCenter)
             hh.addWidget(self._suffix_unit("%"), alignment=Qt.AlignmentFlag.AlignVCenter)
             return cell
-        
+
         def _amount_value_lbl() -> QLabel:
             lbl = QLabel("")
             lbl.setObjectName("summaryValue")
             lbl.setAlignment(
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             )
+            lbl.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Preferred,
+            )
             return lbl
 
         def _label_value_row(lbl: QLabel, value_w: QWidget) -> QWidget:
             row = QWidget()
+            row.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Preferred,
+            )
             hh = QHBoxLayout(row)
             hh.setContentsMargins(0, 0, 0, 0)
             hh.setSpacing(4)
-            # 整行垂直居中，左右两列基线完全对齐
             hh.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
             hh.addWidget(value_w, alignment=Qt.AlignmentFlag.AlignVCenter)
             return row
 
+        _sync_label_texts = (
+            "严格按账期应付额：",
+            "第一优先级应付额：",
+            "第二优先级应付额：",
+            "本月合计应付总额：",
+            "本月可支付总额：",
+            "本月预留款总额：",
+            "第一优先级支付计划占应付额：",
+            "第二优先级支付计划占应付额：",
+            "本月合计排款总额：",
+            "严格按账期排款额：",
+            "第一优先级排款额：",
+            "第二优先级排款额：",
+        )
+        w_sync_label_col = max(_fm_lbl.horizontalAdvance(t) for t in _sync_label_texts)
+
+        def _lbl_purple_fixed(text: str) -> QLabel:
+            w = QLabel(text)
+            w.setObjectName("figmaPurpleLabel")
+            w.setFixedWidth(w_sync_label_col)
+            w.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+            return w
+
+        # —— 卡片：顶部应付额汇总（Figma）——
+        card_summary = QFrame()
+        card_summary.setObjectName("elevatedCard")
+        card_summary.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lay_summary = QVBoxLayout(card_summary)
+        lay_summary.setContentsMargins(m.CARD_PAD_H, m.CARD_PAD_V, m.CARD_PAD_H, m.CARD_PAD_V)
+        lay_summary.setSpacing(m.ROW_GAP)
+
+        self.lbl_due_strict = _amount_value_lbl()
+        self.lbl_due_priority1 = _amount_value_lbl()
+        self.lbl_due_priority2 = _amount_value_lbl()
+        self.lbl_due_month_total = _amount_value_lbl()
+        lay_summary.addWidget(
+            _label_value_row(
+                _lbl_purple_fixed("严格按账期应付额："),
+                _value_yuan_cell(self.lbl_due_strict),
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+        lay_summary.addWidget(
+            _label_value_row(
+                _lbl_purple_fixed("第一优先级应付额："),
+                _value_yuan_cell(self.lbl_due_priority1),
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+        lay_summary.addWidget(
+            _label_value_row(
+                _lbl_purple_fixed("第二优先级应付额："),
+                _value_yuan_cell(self.lbl_due_priority2),
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+        lay_summary.addWidget(
+            _label_value_row(
+                _lbl_purple_fixed("本月合计应付总额："),
+                _value_yuan_cell(self.lbl_due_month_total),
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+        scroll_layout.addWidget(card_summary)
+
+        # —— 卡片：上传 + 可支付/预留/占比 + 排款额 + 智能排款 ——
+        card_ops = QFrame()
+        card_ops.setObjectName("elevatedCard")
+        card_ops.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lay_ops = QVBoxLayout(card_ops)
+        lay_ops.setContentsMargins(m.CARD_PAD_H, m.CARD_PAD_V, m.CARD_PAD_H, m.CARD_PAD_V)
+        lay_ops.setSpacing(m.ROW_GAP)
+
+        row_upload = QHBoxLayout()
+        row_upload.setSpacing(m.GAP_INLINE)
+        self.btn_upload_total = QPushButton("上传排款计划总表")
+        self.btn_upload_total.setObjectName("figmaUploadBtn")
+        self.btn_upload_total.clicked.connect(self._on_upload_total)
+        self.btn_upload_template = QPushButton("上传排款明细模版")
+        self.btn_upload_template.setObjectName("figmaUploadBtn")
+        self.btn_upload_template.clicked.connect(self._on_upload_template)
+        row_upload.addWidget(self.btn_upload_total)
+        row_upload.addWidget(self.btn_upload_template)
+        row_upload.addStretch(1)
+        lay_ops.addLayout(row_upload)
+
         self.lbl_payable_total_value = _amount_value_lbl()
         self.lbl_reserved_total_value = _amount_value_lbl()
-        self.lbl_total_payable_value = _amount_value_lbl()
-        self.lbl_strict_payable_value = _amount_value_lbl()
-        self.lbl_priority1_payable_value = _amount_value_lbl()
-        self.lbl_priority2_payable_value = _amount_value_lbl()
+        self.lbl_sched_month_total = _amount_value_lbl()
+        self.lbl_sched_strict = _amount_value_lbl()
+        self.lbl_sched_priority1 = _amount_value_lbl()
+        self.lbl_sched_priority2 = _amount_value_lbl()
 
         self.edit_priority1_pct = QLineEdit()
         self.edit_priority1_pct.setObjectName("figmaInput")
@@ -424,27 +692,35 @@ class MainWindow(QWidget):
         lv.setSpacing(m.ROW_GAP)
         lv.addWidget(
             _label_value_row(
-                self._lbl_purple("本月可支付总额："),
+                _lbl_purple_fixed("本月可支付总额："),
                 _value_yuan_cell(self.lbl_payable_total_value),
-            )
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
         lv.addWidget(
             _label_value_row(
-                self._lbl_purple("本月预留款总额："),
+                _lbl_purple_fixed("本月预留款总额："),
                 _value_yuan_cell(self.lbl_reserved_total_value),
-            )
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
         lv.addWidget(
             _label_value_row(
-                self._lbl_purple("第一优先级支付计划占应付额："),
+                _lbl_purple_fixed("第一优先级支付计划占应付额："),
                 _pct_tail_widget(self.edit_priority1_pct),
-            )
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
         lv.addWidget(
             _label_value_row(
-                self._lbl_purple("第二优先级支付计划占应付额："),
+                _lbl_purple_fixed("第二优先级支付计划占应付额："),
                 _pct_tail_widget(self.edit_priority2_pct),
-            )
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
 
         right_col = QWidget()
@@ -453,27 +729,35 @@ class MainWindow(QWidget):
         rv.setSpacing(m.ROW_GAP)
         rv.addWidget(
             _label_value_row(
-                self._lbl_purple("本月合计应付总额："),
-                _value_yuan_cell_wide(self.lbl_total_payable_value),
-            )
+                _lbl_purple_fixed("严格按账期排款额："),
+                _value_yuan_cell_wide(self.lbl_sched_strict),
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
         rv.addWidget(
             _label_value_row(
-                self._lbl_purple("严格按账期应付额："),
-                _value_yuan_cell_wide(self.lbl_strict_payable_value),
-            )
+                _lbl_purple_fixed("第一优先级排款额："),
+                _value_yuan_cell_wide(self.lbl_sched_priority1),
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
         rv.addWidget(
             _label_value_row(
-                self._lbl_purple("第一优先级应付额："),
-                _value_yuan_cell_wide(self.lbl_priority1_payable_value),
-            )
+                _lbl_purple_fixed("第二优先级排款额："),
+                _value_yuan_cell_wide(self.lbl_sched_priority2),
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
         rv.addWidget(
             _label_value_row(
-                self._lbl_purple("第二优先级应付额："),
-                _value_yuan_cell_wide(self.lbl_priority2_payable_value),
-            )
+                _lbl_purple_fixed("本月合计排款总额："),
+                _value_yuan_cell_wide(self.lbl_sched_month_total),
+            ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
 
         card1_form = QWidget()
@@ -490,9 +774,9 @@ class MainWindow(QWidget):
         self.btn_smart.clicked.connect(self._on_smart_placeholder)
         card1_row.addWidget(self.btn_smart, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        lay_top.addWidget(card1_form)
+        lay_ops.addWidget(card1_form)
 
-        root.addWidget(card_top)
+        scroll_layout.addWidget(card_ops)
 
         if SHOW_BANK_SETTINGS_CARD:
             # —— 卡片 2：银行模块小标题 + 栅格 ——
@@ -544,7 +828,7 @@ class MainWindow(QWidget):
             lay_amt.setSpacing(m.GAP_TIGHT)
             lay_amt.addWidget(self._lbl_purple("可支付金额："))
             self.edit_amount = QLineEdit()
-            self.edit_amount.setObjectName("figmaInput")
+            self.edit_amount.setObjectName("figmaAmountInput")
             self.edit_amount.setPlaceholderText("")
             self.edit_amount.setValidator(QDoubleValidator(0.0, 1e15, 2))
             self.edit_amount.setMinimumHeight(40)
@@ -567,46 +851,95 @@ class MainWindow(QWidget):
             )
 
             lay_bank.addWidget(pair)
-            root.addWidget(card_bank)
+            scroll_layout.addWidget(card_bank)
 
-        # —— 卡片 2：查看排款 + 数据区（与 figma-smart-payment-ui.html 一致）——
+        # —— 底部卡片：四行各部门明细 + 右侧「查看排款」（Figma）——
+        _cost_row_min_h = max(_fm_amt.height(), _fm_lbl.height()) + 14
+
         card_bottom = QFrame()
         card_bottom.setObjectName("elevatedCard")
         card_bottom.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        lay_bottom = QVBoxLayout(card_bottom)
-        lay_bottom.setContentsMargins(m.CARD_PAD_H, m.CARD_PAD_V, m.CARD_PAD_H, m.CARD_PAD_V)
-        lay_bottom.setSpacing(0)
+        card_bottom.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
+        lay_bottom_outer = QHBoxLayout(card_bottom)
+        lay_bottom_outer.setContentsMargins(m.CARD_PAD_H, m.CARD_PAD_V, m.CARD_PAD_H, m.CARD_PAD_V)
+        lay_bottom_outer.setSpacing(m.GAP_INLINE)
 
+        w_bottom_left = QWidget()
+        w_bottom_left.setSizePolicy(
+            QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum
+        )
+        lay_bottom_left = QVBoxLayout(w_bottom_left)
+        lay_bottom_left.setSpacing(0)
+
+        lay_bottom_left.addWidget(self._lbl_section_title("严格按账期付款-各部门明细"))
+        lay_bottom_left.addSpacing(12)
+        self._w_strict_cost_row = QWidget()
+        self._w_strict_cost_row.setMinimumHeight(_cost_row_min_h)
+        self._lay_strict_cost_row = QHBoxLayout(self._w_strict_cost_row)
+        self._lay_strict_cost_row.setContentsMargins(0, 0, 0, 0)
+        self._lay_strict_cost_row.setSpacing(m.DATA_ROW_GAP)
+        lay_bottom_left.addWidget(self._w_strict_cost_row)
+
+        lay_bottom_left.addSpacing(m.ROW_GAP)
+        lay_bottom_left.addWidget(self._lbl_section_title("第一优先级排款-各部门明细"))
+        lay_bottom_left.addSpacing(12)
+        self._w_priority1_cost_row = QWidget()
+        self._w_priority1_cost_row.setMinimumHeight(_cost_row_min_h)
+        self._lay_priority1_cost_row = QHBoxLayout(self._w_priority1_cost_row)
+        self._lay_priority1_cost_row.setContentsMargins(0, 0, 0, 0)
+        self._lay_priority1_cost_row.setSpacing(m.DATA_ROW_GAP)
+        lay_bottom_left.addWidget(self._w_priority1_cost_row)
+
+        lay_bottom_left.addSpacing(m.ROW_GAP)
+        lay_bottom_left.addWidget(self._lbl_section_title("第二优先级排款-各部门明细"))
+        lay_bottom_left.addSpacing(12)
+        self._w_priority2_cost_row = QWidget()
+        self._w_priority2_cost_row.setMinimumHeight(_cost_row_min_h)
+        self._lay_priority2_cost_row = QHBoxLayout(self._w_priority2_cost_row)
+        self._lay_priority2_cost_row.setContentsMargins(0, 0, 0, 0)
+        self._lay_priority2_cost_row.setSpacing(m.DATA_ROW_GAP)
+        lay_bottom_left.addWidget(self._w_priority2_cost_row)
+
+        lay_bottom_left.addSpacing(m.ROW_GAP)
+        lay_bottom_left.addWidget(self._lbl_section_title("本月合计总排款-各部门明细"))
+        lay_bottom_left.addSpacing(12)
+        self._w_overall_cost_row = QWidget()
+        self._w_overall_cost_row.setMinimumHeight(_cost_row_min_h)
+        self._lay_overall_cost_row = QHBoxLayout(self._w_overall_cost_row)
+        self._lay_overall_cost_row.setContentsMargins(0, 0, 0, 0)
+        self._lay_overall_cost_row.setSpacing(m.DATA_ROW_GAP)
+        lay_bottom_left.addWidget(self._w_overall_cost_row)
+
+        lay_bottom_outer.addWidget(w_bottom_left, 1)
+
+        lay_btn_col = QVBoxLayout()
+        lay_btn_col.addStretch(1)
         self.btn_view_schedule = QPushButton("查看排款")
         self.btn_view_schedule.setObjectName("figmaBlue")
         self.btn_view_schedule.setFixedWidth(100)
         self.btn_view_schedule.clicked.connect(self._on_view_schedule_placeholder)
-        lay_bottom.addWidget(self.btn_view_schedule, 0, Qt.AlignmentFlag.AlignLeft)
+        lay_btn_col.addWidget(
+            self.btn_view_schedule,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        lay_btn_col.addStretch(1)
+        lay_bottom_outer.addLayout(lay_btn_col, 0)
 
-        lay_bottom.addSpacing(m.ROW_GAP)
-        lay_bottom.addWidget(self._lbl_section_title("严格按账期付款情况"))
-        lay_bottom.addSpacing(12)
-        self._w_strict_cost_row = QWidget()
-        self._lay_strict_cost_row = QHBoxLayout(self._w_strict_cost_row)
-        self._lay_strict_cost_row.setContentsMargins(0, 0, 0, 0)
-        self._lay_strict_cost_row.setSpacing(m.DATA_ROW_GAP)
-        lay_bottom.addWidget(self._w_strict_cost_row)
-        lay_bottom.addSpacing(m.ROW_GAP)
-        lay_bottom.addWidget(self._lbl_section_title("本月应付款总体情况"))
-        lay_bottom.addSpacing(12)
-        self._w_overall_cost_row = QWidget()
-        self._lay_overall_cost_row = QHBoxLayout(self._w_overall_cost_row)
-        self._lay_overall_cost_row.setContentsMargins(0, 0, 0, 0)
-        self._lay_overall_cost_row.setSpacing(m.DATA_ROW_GAP)
-        lay_bottom.addWidget(self._w_overall_cost_row)
-        lay_bottom.addStretch(1)
-
-        root.addWidget(card_bottom, 1)
+        scroll_layout.addWidget(card_bottom)
 
         hint = QLabel(f"工作目录：{get_base_dir()}")
         hint.setObjectName("footerHint")
         hint.setWordWrap(True)
-        root.addWidget(hint)
+        footer_bar = QWidget()
+        footer_lay = QHBoxLayout(footer_bar)
+        footer_lay.setContentsMargins(
+            m.PAGE_MARGIN_H, 10, m.PAGE_MARGIN_H, m.PAGE_MARGIN_V
+        )
+        footer_lay.addWidget(hint)
+        root.addWidget(footer_bar, 0)
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(build_app_stylesheet())
@@ -626,9 +959,35 @@ class MainWindow(QWidget):
         except Exception:
             traceback.print_exc()
 
+    def _apply_card1_payable_from_total_sheet(self, path: str) -> None:
+        """读取 TotalSheet 下总表，按账期窗口与付款优先级 0/1/2 汇总卡片 1 应付四行并展示；展示后内存变量清零。"""
+        z = _format_payable_amount(0.0)
+        caps = None
+        try:
+            caps = summarize_card1_payable_from_total_sheet(path)
+        except Exception:
+            traceback.print_exc()
+        if caps is not None:
+            self._n_count0 = caps.n_count0
+            self._n_count1 = caps.n_count1
+            self._n_count2 = caps.n_count2
+            self._n_count_total = caps.n_count_total
+            self.lbl_due_strict.setText(_format_payable_amount(caps.n_count0))
+            self.lbl_due_priority1.setText(_format_payable_amount(caps.n_count1))
+            self.lbl_due_priority2.setText(_format_payable_amount(caps.n_count2))
+            self.lbl_due_month_total.setText(
+                _format_payable_amount(caps.n_count_total)
+            )
+            self._reset_card1_payable_count_vars()
+        else:
+            self.lbl_due_strict.setText(z)
+            self.lbl_due_priority1.setText(z)
+            self.lbl_due_priority2.setText(z)
+            self.lbl_due_month_total.setText(z)
+            self._reset_card1_payable_count_vars()
+
     def _apply_payable_total_from_sheet(self, path: str | None) -> None:
-        """Sheet1 第 4 行「排款总额」右侧数字格求和 → 本月可支付总额。
-        其余右侧字段归零（本月合计应付总额在智能排款后由界面积分计算）。"""
+        """上传总表后：读 TotalSheet 下 Excel，刷新「本月可支付总额」与卡片 1 应付四行；不更新排款额。"""
         if not path or not os.path.isfile(path):
             return
         z = _format_payable_amount(0.0)
@@ -642,10 +1001,7 @@ class MainWindow(QWidget):
         else:
             self.lbl_payable_total_value.setText(_format_payable_amount(total))
         self.lbl_reserved_total_value.setText(z)
-        self.lbl_strict_payable_value.setText(z)
-        self.lbl_priority1_payable_value.setText(z)
-        self.lbl_priority2_payable_value.setText(z)
-        self.lbl_total_payable_value.setText(z)
+        self._apply_card1_payable_from_total_sheet(path)
 
     def _on_upload_total(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -674,6 +1030,7 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "上传失败", str(e))
             return
         self._total_path = dest
+        self._smart_schedule_completed_ok = False
         msg = f"已保存到：\\n{dest}"
         if same_file:
             msg = f"所选文件已在目标目录中：\\n{dest}"
@@ -685,6 +1042,11 @@ class MainWindow(QWidget):
         else:
             self._rebuild_sheet1_strip_cache(dest)
         self._apply_payable_total_from_sheet(dest)
+        z0 = _format_payable_amount(0.0)
+        self.lbl_sched_strict.setText(z0)
+        self.lbl_sched_priority1.setText(z0)
+        self.lbl_sched_priority2.setText(z0)
+        self.lbl_sched_month_total.setText(z0)
 
     def _on_upload_template(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -919,7 +1281,7 @@ class MainWindow(QWidget):
                 background: transparent;
             }}
             QLabel#smartOkBody {{
-                color: {Figma.LABEL_PURPLE};
+                color: {Figma.AMOUNT_TEXT};
                 font-size: 15px;
                 background: transparent;
             }}
@@ -977,6 +1339,7 @@ class MainWindow(QWidget):
         dlg.exec()
 
     def _on_smart_placeholder(self) -> None:
+        self._reset_card1_payable_count_vars()
         ensure_workspace()
         ts_dir = total_sheet_dir()
         dt_dir = detail_template_dir()
@@ -1058,6 +1421,7 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "智能排款失败", str(e))
             traceback.print_exc()
             return
+        self._smart_schedule_completed_ok = True
         if not SHOW_BANK_SETTINGS_CARD:
             self._total_path = find_latest_total_excel(total_sheet_dir())
             self._rebuild_sheet1_strip_cache(self._total_path)
@@ -1067,16 +1431,16 @@ class MainWindow(QWidget):
             )
         else:
             self.lbl_reserved_total_value.setText("")
-        self.lbl_strict_payable_value.setText(
+        self.lbl_sched_strict.setText(
             _format_payable_amount(res.priority0_total)
         )
-        self.lbl_priority1_payable_value.setText(
+        self.lbl_sched_priority1.setText(
             _format_payable_amount(res.priority1_total)
         )
-        self.lbl_priority2_payable_value.setText(
+        self.lbl_sched_priority2.setText(
             _format_payable_amount(res.priority2_total)
         )
-        self.lbl_total_payable_value.setText(
+        self.lbl_sched_month_total.setText(
             _format_payable_amount(
                 res.priority0_total + res.priority1_total + res.priority2_total
             )
@@ -1104,14 +1468,14 @@ class MainWindow(QWidget):
         self._show_smart_schedule_success_dialog(res)
 
     def _on_view_schedule_placeholder(self) -> None:
-        """查看排款：两板块按 Sheet4+Sheet1 回填；卡片1「严格按账期应付额」= 严格按账期付款板块合计（sum_zero）。"""
+        """查看排款：校验前置条件后统计并仅刷新卡片 3（底部四行各部门明细）。"""
         ensure_workspace()
         ts = total_sheet_dir()
         if _workspace_dir_is_empty(ts):
             QMessageBox.warning(
                 self,
                 "查看排款",
-                "请先进行智能排款再查看排款。",
+                _VIEW_SCHEDULE_PREREQ_MSG,
             )
             self._refresh_owner_cost_panels(None)
             return
@@ -1120,16 +1484,31 @@ class MainWindow(QWidget):
             QMessageBox.warning(
                 self,
                 "查看排款",
-                "请先进行智能排款再查看排款。",
+                _VIEW_SCHEDULE_PREREQ_MSG,
             )
             self._refresh_owner_cost_panels(None)
             return
-        stats = self._refresh_owner_cost_panels(latest)
-        if stats is not None:
-            self.lbl_strict_payable_value.setText(
-                _format_payable_amount(stats.sum_zero)
+        if not latest.lower().endswith(".xlsx"):
+            QMessageBox.warning(
+                self,
+                "查看排款",
+                "查看排款仅支持 .xlsx 格式的排款计划总表。",
             )
-
+            self._refresh_owner_cost_panels(None)
+            return
+        plan_no_numeric = not sheet1_payment_plan_has_numeric_entries(latest)
+        if (not self._smart_schedule_completed_ok) or plan_no_numeric:
+            QMessageBox.warning(
+                self,
+                "查看排款",
+                _VIEW_SCHEDULE_PREREQ_MSG,
+            )
+            if os.path.isfile(latest) and latest.lower().endswith(".xlsx"):
+                self._refresh_owner_bottom_placeholder_from_path(latest)
+            else:
+                self._refresh_owner_cost_panels(None)
+            return
+        self._refresh_owner_cost_panels(latest)
 
 def _apply_ui_font(app: QApplication) -> None:
     f = QFont()

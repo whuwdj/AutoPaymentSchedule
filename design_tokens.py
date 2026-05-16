@@ -22,6 +22,8 @@ class Figma:
     CARD_PAD_V = 16
 
     LABEL_PURPLE = "#722ED1"
+    # 金额数字及相邻「元」等资金展示（与标签紫色区分）
+    AMOUNT_TEXT = "#0052CC"
     SECTION_MICRO = "#9254DE"
     TEXT_MUTED = "#8C8C8C"
 
@@ -164,7 +166,11 @@ def build_app_stylesheet() -> str:
         font-size: {t.MICRO_PT * 1.5}px;
         font-weight: 500;
     }}
-    QLabel#suffixYuan, QLabel#suffixUnit {{
+    QLabel#suffixYuan {{
+        color: {t.AMOUNT_TEXT};
+        font-size: {t.LABEL_PT}px;
+    }}
+    QLabel#suffixUnit {{
         color: {t.LABEL_PURPLE};
         font-size: {t.LABEL_PT}px;
     }}
@@ -173,7 +179,7 @@ def build_app_stylesheet() -> str:
         font-size: {t.BODY_PT}px;
     }}
     QLabel#summaryValue {{
-        color: {t.LABEL_PURPLE};
+        color: {t.AMOUNT_TEXT};
         font-size: {t.BODY_PT + 1}px;
         font-weight: 700;
         min-width: 2em;
@@ -194,6 +200,20 @@ def build_app_stylesheet() -> str:
         font-size: {t.BODY_PT}px;
     }}
     QLineEdit#figmaInput:focus {{
+        border: 1px solid {t.BORDER_INPUT_FOCUS};
+    }}
+
+    QLineEdit#figmaAmountInput {{
+        background: {t.BG_INPUT};
+        border: 1px solid {t.BORDER_INPUT};
+        border-radius: {t.RADIUS_INPUT}px;
+        padding: 0 6px;
+        min-height: 30px;
+        max-height: 32px;
+        color: {t.AMOUNT_TEXT};
+        font-size: {t.BODY_PT}px;
+    }}
+    QLineEdit#figmaAmountInput:focus {{
         border: 1px solid {t.BORDER_INPUT_FOCUS};
     }}
 

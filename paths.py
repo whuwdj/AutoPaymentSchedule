@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 
 
@@ -40,3 +41,19 @@ def detail_template_dir() -> str:
 def ensure_workspace() -> None:
     os.makedirs(total_sheet_dir(), exist_ok=True)
     os.makedirs(detail_template_dir(), exist_ok=True)
+
+
+def clear_workspace_upload_dirs() -> None:
+    """清空 TotalSheet、DetailTemplate 目录内的文件与子目录（保留目录本身）。"""
+    for d in (total_sheet_dir(), detail_template_dir()):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            p = os.path.join(d, name)
+            try:
+                if os.path.isfile(p) or os.path.islink(p):
+                    os.unlink(p)
+                elif os.path.isdir(p):
+                    shutil.rmtree(p)
+            except OSError:
+                pass

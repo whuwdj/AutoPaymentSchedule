@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 按 Sheet4「负责人→成本名称」顺序，从 Sheet1 汇总「付款计划」列：
-- 付款优先级 = 0：按负责人汇总（nCountZero 系列）及合计；
-- 全量（nCountAll）：不看付款优先级，仅按负责人汇总付款计划。
+- 付款优先级 = 0：按负责人汇总（nCountZero*_0）及板块合计 sum_zero；
+- 付款优先级 = 1 / 2：按负责人汇总（nCountZero*_1 / *_2）及合计 sum_priority1 / sum_priority2；
+- 全量：不按优先级筛选，按负责人汇总（nCountAll*）及合计 sum_all。
+查看排款前置：Sheet1「付款计划」列须存在至少一格可解析数值，否则提示先智能排款。
 """
 
 from __future__ import annotations
@@ -30,13 +32,16 @@ from smart_schedule import (
 
 @dataclass(frozen=True)
 class OwnerCostPanelStats:
-    """与 Sheet4 负责人首次出现顺序一致；展示用标签为成本名称（空则回退负责人）。
-    per_owner_all / sum_all：按负责人汇总付款计划，不筛选付款优先级。"""
+    """与 Sheet4 负责人首次出现顺序一致；展示用标签为成本名称（空则回退负责人）。"""
 
     cost_labels: Tuple[str, ...]
     per_owner_zero: Tuple[float, ...]
+    per_owner_priority1: Tuple[float, ...]
+    per_owner_priority2: Tuple[float, ...]
     per_owner_all: Tuple[float, ...]
     sum_zero: float
+    sum_priority1: float
+    sum_priority2: float
     sum_all: float
 
 
@@ -99,6 +104,60 @@ def _find_sheet1_owner_col(ws: Worksheet, header_row: int) -> Optional[int]:
     return None
 
 
+def load_sheet4_cost_display_labels(path: str) -> Optional[Tuple[str, ...]]:
+    """
+    仅从 Sheet4 读取负责人顺序与展示标签（成本名称，空则回退负责人）。
+    用于无汇总数据时仍与 Sheet4 列顺序、标签一致地占位 0.00。
+    """
+    if _is_xls(path):
+        return None
+    wb = load_workbook(path, read_only=False, data_only=True)
+    try:
+        if len(wb.worksheets) < 4:
+            return None
+        ws4 = wb.worksheets[3]
+        h4 = _find_sheet4_header_cols(ws4)
+        if h4 is None:
+            return None
+        hr4, c4o, c4c = h4
+        pairs = _sheet4_ordered_owner_cost_pairs(ws4, hr4, c4o, c4c)
+        if not pairs:
+            return None
+        return tuple(
+            (cost_nm if cost_nm else owner) for owner, cost_nm in pairs
+        )
+    finally:
+        wb.close()
+
+
+def sheet1_payment_plan_has_numeric_entries(path: str) -> bool:
+    """
+    Sheet1 数据区「付款计划」列是否存在至少一格可解析为数值（含 0）。
+    若无，视为「付款计划列全部为空」；用于「查看排款」前置。
+    """
+    if _is_xls(path):
+        return False
+    wb = load_workbook(path, read_only=False, data_only=True)
+    try:
+        ws1 = wb.worksheets[0]
+        hr1 = _find_sheet1_header_row(ws1)
+        if hr1 is None:
+            return False
+        c_plan = _find_payment_plan_col(ws1, hr1)
+        if c_plan is None:
+            return False
+        max_r1 = ws1.max_row or 0
+        for r in range(hr1 + 1, max_r1 + 1):
+            cell_p = ws1.cell(row=r, column=c_plan)
+            if isinstance(cell_p, MergedCell):
+                continue
+            if _coerce_numeric_for_sum(cell_p.value) is not None:
+                return True
+        return False
+    finally:
+        wb.close()
+
+
 def load_owner_cost_panel_stats(path: str) -> Optional[OwnerCostPanelStats]:
     """
     读取总表：Sheet4 定顺序与成本名称；Sheet1 按负责人汇总付款计划列。
@@ -134,6 +193,8 @@ def load_owner_cost_panel_stats(path: str) -> Optional[OwnerCostPanelStats]:
             return None
 
         sum_zero: Dict[str, float] = {}
+        sum_p1: Dict[str, float] = {}
+        sum_p2: Dict[str, float] = {}
         sum_all: Dict[str, float] = {}
         max_r1 = ws1.max_row or 0
         for r in range(hr1 + 1, max_r1 + 1):
@@ -149,23 +210,36 @@ def load_owner_cost_panel_stats(path: str) -> Optional[OwnerCostPanelStats]:
             n = _coerce_numeric_for_sum(cell_p.value)
             amt = float(n) if n is not None else 0.0
             sum_all[owner] = sum_all.get(owner, 0.0) + amt
-            if _priority_level_0_2(ws1.cell(row=r, column=c_pri).value) == 0:
+            pl = _priority_level_0_2(ws1.cell(row=r, column=c_pri).value)
+            if pl == 0:
                 sum_zero[owner] = sum_zero.get(owner, 0.0) + amt
+            elif pl == 1:
+                sum_p1[owner] = sum_p1.get(owner, 0.0) + amt
+            elif pl == 2:
+                sum_p2[owner] = sum_p2.get(owner, 0.0) + amt
 
         cost_labels: List[str] = []
         zero_list: List[float] = []
+        p1_list: List[float] = []
+        p2_list: List[float] = []
         all_list: List[float] = []
         for owner, cost_nm in pairs:
             label = cost_nm if cost_nm else owner
             cost_labels.append(label)
             zero_list.append(sum_zero.get(owner, 0.0))
+            p1_list.append(sum_p1.get(owner, 0.0))
+            p2_list.append(sum_p2.get(owner, 0.0))
             all_list.append(sum_all.get(owner, 0.0))
 
         return OwnerCostPanelStats(
             cost_labels=tuple(cost_labels),
             per_owner_zero=tuple(zero_list),
+            per_owner_priority1=tuple(p1_list),
+            per_owner_priority2=tuple(p2_list),
             per_owner_all=tuple(all_list),
             sum_zero=sum(zero_list),
+            sum_priority1=sum(p1_list),
+            sum_priority2=sum(p2_list),
             sum_all=sum(all_list),
         )
     finally:
