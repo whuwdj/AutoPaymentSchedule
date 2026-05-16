@@ -5,3 +5,6 @@ __pycache__/
 *.py[cod]
 _data/
 Untitled
+.specstory/
+__pycache__/
+.venv/
