@@ -8,7 +8,7 @@
 核心计算（与业务规格一致，见 run_smart_schedule_on_total_sheet / _compute_ntotal_for_priority）：
 - 账期数 nPeriodCount = 协议账期÷30（_protocol_period_months）。
 - nPayablesSum：「当月已开票余额」列之后～「截止」列之前，表头 nMonth（「N个月」取 N）满足 nMonth≥nPeriodCount
-  的单元格数值之和（_sum_over_invoice_cutoff_window）；截止列及其右侧不参与。
+  且单元格数值≥0 的格求和（_sum_over_invoice_cutoff_window，负数不计）；截止列及其右侧不参与。
 - 优先级 0：nTotalSum=nPayablesSum；上述区间内数值非空且>0 的格标浅绿（_highlight_priority0_month_window）。
 - 优先级 1/2：nTotalSum=nPayablesSum×(界面整数百分比÷100)；锚点为上述区间内自右向左最后一个数值非空列，
   nPeriodPercent=(锚点值/nPayablesSum)×100，与 nPercentOne/nPercentTwo 比较后循环降月或分格渐变着色
@@ -34,6 +34,7 @@ from openpyxl.cell.cell import Cell, MergedCell
 from openpyxl.styles import GradientFill, PatternFill
 from openpyxl.styles.colors import Color
 from openpyxl.styles.fills import Stop
+from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -374,19 +375,22 @@ def _payment_cols_sorted_by_sheet3_bank_priority(
     return sorted(bank_cols, key=sort_key)
 
 
-def _sum_over_invoice_cutoff_window(
+def _collect_invoice_cutoff_sum_terms(
     ws: Worksheet,
     header_row: int,
     r: int,
     c_invoice: int,
     c_cutoff: int,
     min_month_threshold: float,
-) -> float:
+    *,
+    non_negative_only: bool = True,
+) -> List[Tuple[str, float]]:
     """
     步骤 2～3：对「当月已开票余额」列之后～「截止」列之前各列，读表头得 nMonth；
     仅当 nMonth 可解析且 nMonth ≥ min_month_threshold 时，将本行该列数值计入和（截止列及右侧不参与）。
+    默认仅计入数值 ≥ 0 的格（负数跳过）；nPayablesSum 与卡片 1 应付汇总均用此规则。
     """
-    total = 0.0
+    terms: List[Tuple[str, float]] = []
     for c in range(c_invoice + 1, c_cutoff):
         mn = _month_bucket_n(ws.cell(row=header_row, column=c).value)
         if mn is None:
@@ -394,9 +398,44 @@ def _sum_over_invoice_cutoff_window(
         if float(mn) < min_month_threshold:
             continue
         num = _coerce_numeric_for_sum(ws.cell(row=r, column=c).value)
-        if num is not None:
-            total += num
-    return total
+        if num is None:
+            continue
+        fv = float(num)
+        if non_negative_only and fv < 0.0:
+            continue
+        terms.append((f"{get_column_letter(c)}{r}", fv))
+    return terms
+
+
+def _format_invoice_cutoff_sum_expr(terms: List[Tuple[str, float]]) -> str:
+    """将参与求和的格格式化为 E12+F12+G12=300 或 E12=100。"""
+    if not terms:
+        return "（无参与求和的数值格）=0"
+    addrs = "+".join(addr for addr, _ in terms)
+    total = sum(v for _, v in terms)
+    return f"{addrs}={total:g}"
+
+
+def _sum_over_invoice_cutoff_window(
+    ws: Worksheet,
+    header_row: int,
+    r: int,
+    c_invoice: int,
+    c_cutoff: int,
+    min_month_threshold: float,
+    *,
+    non_negative_only: bool = True,
+) -> float:
+    terms = _collect_invoice_cutoff_sum_terms(
+        ws,
+        header_row,
+        r,
+        c_invoice,
+        c_cutoff,
+        min_month_threshold,
+        non_negative_only=non_negative_only,
+    )
+    return sum(v for _, v in terms)
 
 
 _LIGHT_GREEN_FILL = PatternFill(
@@ -517,8 +556,10 @@ def _cols_qualifying_month(
 def _find_last_nonempty_numeric_col(
     ws: Worksheet, r: int, cols: List[int],
 ) -> Optional[int]:
+    """自右向左最后一个可解析且数值 ≥ 0 的列（与 nPayablesSum 不计负数一致）。"""
     for c in reversed(cols):
-        if _coerce_numeric_for_sum(ws.cell(row=r, column=c).value) is not None:
+        n = _coerce_numeric_for_sum(ws.cell(row=r, column=c).value)
+        if n is not None and float(n) >= 0.0:
             return c
     return None
 
@@ -536,11 +577,14 @@ def _find_first_col_by_month_in_window(
 def _sum_numeric_from_col_right_in_window(
     ws: Worksheet, r: int, c_start: int, c_cutoff: int
 ) -> float:
+    """自 c_start 至截止列前求和；仅计入数值 ≥ 0 的格（与 nPayablesSum 一致）。"""
     s = 0.0
     for c in range(c_start, c_cutoff):
         n = _coerce_numeric_for_sum(ws.cell(row=r, column=c).value)
         if n is not None:
-            s += float(n)
+            fv = float(n)
+            if fv >= 0.0:
+                s += fv
     return s
 
 
@@ -664,7 +708,7 @@ def _compute_ntotal_priority12_with_highlights(
         return n_total_sum
 
     v0 = _coerce_numeric_for_sum(ws.cell(row=r, column=c_anchor).value)
-    if v0 is None:
+    if v0 is None or float(v0) < 0.0:
         return n_total_sum
 
     npct = (float(v0) / float(n_payables)) * 100.0
@@ -778,12 +822,15 @@ def summarize_card1_payable_from_total_sheet(path: str) -> Optional[Card1Payable
     1. 数据区间：表头行定位后，列范围为「当月已开票余额」列之后至「截止」列之前；截止列及右侧不参与。
     2. 表头各列解析月份数 nMonth（「N个月」取 N；「年以上」等见 _month_bucket_n）。
     3. 行内 nPeriodCount = 协议账期÷30；仅保留 nMonth ≥ nPeriodCount 的列参与本行求和。
-    4. 对每一行在上述列上单元格数值求和 → 该行应付总额（_sum_over_invoice_cutoff_window）。
-    5. 按行「付款优先级」0、1、2 分别累加各行应付总额 → nCount0、nCount1、nCount2。
-    6. nCountTotal = nCount0 + nCount1 + nCount2。
-    7. 供界面展示：严格按账期应付额、第一/二优先级应付额、本月合计应付总额。
+    4. 付款优先级=0 的行：上述列内数值 ≥0 的单元格求和，累加为 nCount0。
+    5. 付款优先级=1 的行：同上累加为 nCount1。
+    6. 付款优先级=2 的行：同上累加为 nCount2。
+    （与智能排款 nPayablesSum 相同：负数不计。）
+    7. nCountTotal = nCount0 + nCount1 + nCount2。
+    8. 供界面展示四行；展示后由 main 将内存变量 nCount0/1/2/Total 置 0（界面数字不变）。
 
-    行筛选：非空主体且付款优先级为 0/1/2（与智能排款入口一致）；协议账期无法解析则跳过该行。
+    行筛选：非空主体且付款优先级为 0/1/2；协议账期无法解析则跳过该行。
+    步骤 4 对优先级 0 逐行打印求和明细到控制台（如 Z17+AA17=138400）。
     """
     if _is_xls(path):
         return None
@@ -813,6 +860,7 @@ def summarize_card1_payable_from_total_sheet(path: str) -> Optional[Card1Payable
         n0 = 0.0
         n1 = 0.0
         n2 = 0.0
+        # logged_n0_step4 = False
         for r in range(header_row + 1, max_r + 1):
             pl = _priority_level_0_2(ws.cell(row=r, column=c_priority).value)
             if pl is None:
@@ -823,17 +871,51 @@ def summarize_card1_payable_from_total_sheet(path: str) -> Optional[Card1Payable
             n_period = _protocol_period_months(ws.cell(row=r, column=c_agreement).value)
             if n_period is None:
                 continue
-            row_sum = float(
-                _sum_over_invoice_cutoff_window(
-                    ws, header_row, r, c_invoice, c_cutoff, n_period
-                )
-            )
             if pl == 0:
+                terms = _collect_invoice_cutoff_sum_terms(
+                    ws,
+                    header_row,
+                    r,
+                    c_invoice,
+                    c_cutoff,
+                    n_period,
+                )
+                row_sum = float(sum(v for _, v in terms))
+                # if not logged_n0_step4:
+                #     print(
+                #         "[卡片1应付·步骤4] 筛选付款优先级=0，"
+                #         "nMonth≥nPeriodCount 且单元格数值≥0 的列求和累计 nCount0",
+                #         flush=True,
+                #     )
+                #     logged_n0_step4 = True
                 n0 += row_sum
-            elif pl == 1:
-                n1 += row_sum
-            elif pl == 2:
-                n2 += row_sum
+                # print(
+                #     f"[卡片1应付·步骤4] 第{r}行 主体={subj} "
+                #     f"nPeriodCount={n_period:g} | "
+                #     f"{_format_invoice_cutoff_sum_expr(terms)} | "
+                #     f"本行={row_sum:,.2f} | 累计nCount0={n0:,.2f}",
+                #     flush=True,
+                # )
+            else:
+                row_sum = float(
+                    _sum_over_invoice_cutoff_window(
+                        ws,
+                        header_row,
+                        r,
+                        c_invoice,
+                        c_cutoff,
+                        n_period,
+                    )
+                )
+                if pl == 1:
+                    n1 += row_sum
+                elif pl == 2:
+                    n2 += row_sum
+        # if logged_n0_step4:
+        #     print(
+        #         f"[卡片1应付·步骤4] nCount0 合计={n0:,.2f}",
+        #         flush=True,
+        #     )
         nt = n0 + n1 + n2
         return Card1PayableTotals(
             n_count0=n0, n_count1=n1, n_count2=n2, n_count_total=nt
