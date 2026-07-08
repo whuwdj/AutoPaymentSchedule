@@ -69,6 +69,7 @@ from paths import (
 )
 from smart_schedule import (
     SmartScheduleResult,
+    preprocess_total_sheet_after_upload,
     run_smart_schedule_on_total_sheet,
     summarize_card1_payable_from_total_sheet,
 )
@@ -1049,6 +1050,23 @@ class MainWindow(QWidget):
         except OSError as e:
             QMessageBox.critical(self, "上传失败", str(e))
             return
+        preprocess_ok = False
+        if dest.lower().endswith(".xlsx"):
+            try:
+                preprocess_total_sheet_after_upload(dest)
+                preprocess_ok = True
+            except ValueError as e:
+                QMessageBox.warning(
+                    self,
+                    "预处理提示",
+                    f"总表已上传，但预处理未完成：\\n{e}",
+                )
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "预处理提示",
+                    f"总表已上传，但预处理失败：\\n{e}",
+                )
         self._total_path = dest
         self._smart_schedule_completed_ok = False
         msg = f"已保存到：\\n{dest}"
@@ -1056,6 +1074,8 @@ class MainWindow(QWidget):
             msg = f"所选文件已在目标目录中：\\n{dest}"
         elif replaced:
             msg += "\\n（已覆盖同名文件。）"
+        if dest.lower().endswith(".xlsx") and preprocess_ok:
+            msg += "\\n（已预处理并保存总表。）"
         QMessageBox.information(self, "上传成功", msg)
         if SHOW_BANK_SETTINGS_CARD:
             self._refresh_bank_combo()

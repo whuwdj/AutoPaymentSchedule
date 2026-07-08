@@ -22,7 +22,11 @@
 from __future__ import annotations
 
 import math
+import os
 import re
+import shutil
+import tempfile
+import zipfile
 from collections import defaultdict
 from copy import copy
 from dataclasses import dataclass
@@ -34,7 +38,7 @@ from openpyxl.cell.cell import Cell, MergedCell
 from openpyxl.styles import GradientFill, PatternFill
 from openpyxl.styles.colors import Color
 from openpyxl.styles.fills import Stop
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -208,6 +212,265 @@ def _find_cutoff_col(ws: Worksheet, header_row: int) -> Optional[int]:
     return _find_col_by_exact(ws, header_row, "截止")
 
 
+_PREPROCESS_HEADER_ROW = 2
+_PREPROCESS_DATA_START_ROW = 9
+
+
+def _find_payable_aging_cols_in_window(
+    ws: Worksheet, c_invoice: int, c_cutoff: int
+) -> List[int]:
+    """
+    第 1 行「应付账龄」合并区域内的列，且位于 (当月已开票余额, 截止) 之间。
+    合并单元格仅左上角有文字，须读 merged_cells；找不到时退化为该区间内全部列。
+    """
+    lo = c_invoice + 1
+    hi = c_cutoff - 1
+    if lo > hi:
+        return []
+
+    aging_lo: Optional[int] = None
+    aging_hi: Optional[int] = None
+    for mr in ws.merged_cells.ranges:
+        if mr.min_row <= 1 <= mr.max_row:
+            tl = _cell_text_normalized(ws.cell(row=1, column=mr.min_col).value)
+            if "应付账龄" in tl:
+                aging_lo, aging_hi = mr.min_col, mr.max_col
+                break
+    if aging_lo is None:
+        for c in range(1, (ws.max_column or 0) + 1):
+            h = _cell_text_normalized(ws.cell(row=1, column=c).value)
+            if "应付账龄" in h:
+                aging_lo, aging_hi = c, c
+                break
+
+    if aging_lo is None:
+        return list(range(lo, hi + 1))
+
+    start = max(lo, aging_lo)
+    end = min(hi, aging_hi)
+    if start > end:
+        return list(range(lo, hi + 1))
+    return list(range(start, end + 1))
+
+
+_SUM_FORMULA_RE = re.compile(
+    r"^=\s*SUM\s*\(\s*([A-Za-z]+)(\d+)\s*:\s*([A-Za-z]+)(\d+)\s*\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _resolve_preprocess_numeric(ws: Worksheet, ws_values: Worksheet, row: int, col: int) -> Optional[float]:
+    """
+    预处理读数：优先 data_only 缓存值；公式格无缓存时尝试解析 =SUM(C1:D1) 对引用区间求和。
+    """
+    v = _coerce_numeric_for_sum(ws_values.cell(row=row, column=col).value)
+    if v is not None:
+        return float(v)
+    raw = ws.cell(row=row, column=col).value
+    if not isinstance(raw, str) or not raw.strip().startswith("="):
+        return None
+    m = _SUM_FORMULA_RE.match(raw.strip())
+    if m is None:
+        return None
+    c_lo = column_index_from_string(m.group(1).upper())
+    c_hi = column_index_from_string(m.group(3).upper())
+    if c_lo > c_hi:
+        c_lo, c_hi = c_hi, c_lo
+    total = 0.0
+    found = False
+    for c in range(c_lo, c_hi + 1):
+        n = _coerce_numeric_for_sum(ws_values.cell(row=row, column=c).value)
+        if n is not None:
+            total += float(n)
+            found = True
+    return total if found else None
+
+
+def _deduct_from_aging_cols_right_to_left(
+    ws: Worksheet,
+    row: int,
+    aging_cols: List[int],
+    n_amount: float,
+    ws_values: Worksheet,
+) -> None:
+    """从账龄列右向左扣减，凑 n_amount；凑不够则扣光所有 >0 格。数值从 ws_values 读取（公式缓存值）。"""
+    remaining = float(n_amount)
+    for c in reversed(aging_cols):
+        if remaining <= 0:
+            break
+        cell = ws.cell(row=row, column=c)
+        if isinstance(cell, MergedCell):
+            continue
+        v = _resolve_preprocess_numeric(ws, ws_values, row, c)
+        if v is None or float(v) <= 0:
+            continue
+        fv = float(v)
+        if fv <= remaining:
+            remaining -= fv
+            cell.value = 0
+        else:
+            cell.value = fv - remaining
+            remaining = 0.0
+
+
+def _build_formula_cache_map(ws: Worksheet) -> Dict[str, float]:
+    """为 =SUM(同列区间) 公式格计算缓存值，避免 Excel 打开后误判为未保存。"""
+    cache: Dict[str, float] = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            if getattr(cell, "data_type", None) != "f":
+                continue
+            raw = cell.value
+            if not isinstance(raw, str):
+                continue
+            m = _SUM_FORMULA_RE.match(raw.strip())
+            if m is None:
+                continue
+            c_lo = column_index_from_string(m.group(1).upper())
+            c_hi = column_index_from_string(m.group(3).upper())
+            r_lo = int(m.group(2))
+            r_hi = int(m.group(4))
+            if r_lo != r_hi or r_lo != cell.row:
+                continue
+            total = 0.0
+            found = False
+            for c in range(min(c_lo, c_hi), max(c_lo, c_hi) + 1):
+                n = _coerce_numeric_for_sum(ws.cell(row=r_lo, column=c).value)
+                if n is not None:
+                    total += float(n)
+                    found = True
+            if found:
+                cache[cell.coordinate] = total
+    return cache
+
+
+def _build_formula_cache_maps(wb) -> Dict[str, Dict[str, float]]:
+    maps: Dict[str, Dict[str, float]] = {}
+    for idx, ws in enumerate(wb.worksheets, 1):
+        sheet_cache = _build_formula_cache_map(ws)
+        if sheet_cache:
+            maps[f"xl/worksheets/sheet{idx}.xml"] = sheet_cache
+    return maps
+
+
+def _patch_sheet_xml_formula_caches(xml: str, cache_map: Dict[str, float]) -> str:
+    for coord, val in cache_map.items():
+        v_text = f"{val:g}"
+        pattern = (
+            rf'(<c r="{re.escape(coord)}"[^>]*>.*?<f(?:[^>]*)>[^<]*</f>)\s*'
+            rf"<v>[^<]*</v>\s*(</c>)"
+        )
+        xml, n = re.subn(pattern, rf"\1<v>{v_text}</v>\2", xml, count=1, flags=re.DOTALL)
+        if n == 0:
+            pattern2 = (
+                rf'(<c r="{re.escape(coord)}"[^>]*>.*?<f(?:[^>]*)>[^<]*</f>)\s*(</c>)'
+            )
+            xml, _ = re.subn(
+                pattern2, rf"\1<v>{v_text}</v>\2", xml, count=1, flags=re.DOTALL
+            )
+    return xml
+
+
+def _apply_formula_cache_patches(path: str, cache_maps: Dict[str, Dict[str, float]]) -> None:
+    if not cache_maps:
+        return
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(tmp_fd)
+    try:
+        with zipfile.ZipFile(path, "r") as zin:
+            with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for info in zin.infolist():
+                    data = zin.read(info.filename)
+                    sheet_cache = cache_maps.get(info.filename)
+                    if sheet_cache:
+                        xml = data.decode("utf-8")
+                        data = _patch_sheet_xml_formula_caches(xml, sheet_cache).encode(
+                            "utf-8"
+                        )
+                    zout.writestr(info, data)
+        shutil.move(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
+def _save_workbook_to_path(wb, path: str) -> None:
+    """保存工作簿、写回公式缓存并刷盘，避免 Excel 打开后误报未保存。"""
+    calc = getattr(wb, "calculation", None)
+    if calc is not None:
+        calc.fullCalcOnLoad = False
+        calc.calcCompleted = True
+    cache_maps = _build_formula_cache_maps(wb)
+    wb.save(path)
+    _apply_formula_cache_patches(path, cache_maps)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def preprocess_total_sheet_after_upload(path: str) -> None:
+    """
+    上传总表后预处理（仅 .xlsx）：自第 9 行起，按「本月预排金额」nAmount
+    在 (当月已开票余额, 截止) 账龄列内从右向左扣减；再将该行「当月已开票余额」减 nAmount。
+    """
+    if _is_xls(path):
+        return
+    wb = load_workbook(path, read_only=False, data_only=False)
+    wb_vals = load_workbook(path, read_only=False, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        ws_vals = wb_vals.worksheets[0]
+        hr = _PREPROCESS_HEADER_ROW
+        c_pre = _find_col_by_exact(ws, hr, "本月预排金额")
+        c_invoice = _find_invoice_balance_col(ws, hr)
+        c_cutoff = _find_cutoff_col(ws, hr)
+        missing: List[str] = []
+        if c_pre is None:
+            missing.append("本月预排金额")
+        if c_invoice is None:
+            missing.append("当月已开票余额")
+        if c_cutoff is None:
+            missing.append("截止")
+        if missing:
+            raise ValueError("第 2 行缺少必要列：" + "、".join(missing))
+        if c_invoice + 1 >= c_cutoff:
+            raise ValueError("「当月已开票余额」须位于「截止」列左侧。")
+
+        aging_cols = _find_payable_aging_cols_in_window(ws, c_invoice, c_cutoff)
+
+        max_r = ws.max_row or 0
+        for r in range(_PREPROCESS_DATA_START_ROW, max_r + 1):
+            n_raw = _resolve_preprocess_numeric(ws, ws_vals, r, c_pre)
+            if n_raw is None or float(n_raw) <= 0:
+                continue
+            n_amount = float(n_raw)
+            inv_base = _resolve_preprocess_numeric(ws, ws_vals, r, c_invoice)
+            _deduct_from_aging_cols_right_to_left(
+                ws, r, aging_cols, n_amount, ws_vals
+            )
+            inv_cell = ws.cell(row=r, column=c_invoice)
+            if isinstance(inv_cell, MergedCell):
+                continue
+            base = float(inv_base) if inv_base is not None else 0.0
+            inv_cell.value = base - n_amount
+
+        wb_vals.close()
+        wb_vals = None
+        _save_workbook_to_path(wb, path)
+    finally:
+        if wb_vals is not None:
+            wb_vals.close()
+        wb.close()
+
+
 def _find_first_payment_col(ws: Worksheet, header_row: int) -> Optional[int]:
     for c in range(1, (ws.max_column or 0) + 1):
         h = _norm_h(ws.cell(row=header_row, column=c).value)
@@ -373,6 +636,14 @@ def _payment_cols_sorted_by_sheet3_bank_priority(
         return (1, 0.0, c)
 
     return sorted(bank_cols, key=sort_key)
+
+
+def _find_fund_plan_col(ws: Worksheet, bank_cols: List[int]) -> Optional[int]:
+    """第 3 行银行名称为「资金计划」的列（第 1 笔～合计已排款之间）。"""
+    for c in bank_cols:
+        if _norm_h(_cell_text_normalized(ws.cell(row=3, column=c).value)) == "资金计划":
+            return c
+    return None
 
 
 def _collect_invoice_cutoff_sum_terms(
@@ -1257,6 +1528,7 @@ def run_smart_schedule_on_total_sheet(
         payment_cols: List[int] = _payment_cols_sorted_by_sheet3_bank_priority(
             ws, bank_cols, bank_pri_map
         )
+        c_fund_plan = _find_fund_plan_col(ws, bank_cols)
 
         max_r = ws.max_row or 0
         candidates: List[Tuple[int, int]] = []
@@ -1321,6 +1593,22 @@ def run_smart_schedule_on_total_sheet(
                 rows_skipped += 1
                 continue
 
+            if (
+                n_total_sum <= 30000.0
+                and c_fund_plan is not None
+                and _col_balance(c_fund_plan) > 30000.0
+            ):
+                ws.cell(row=r, column=c_fund_plan, value=n_total_sum)
+                _reduce_balance(c_fund_plan, n_total_sum)
+                assert c_payment_plan is not None
+                old_plan = _coerce_numeric_for_sum(
+                    ws.cell(row=r, column=c_payment_plan).value
+                )
+                plan_base = float(old_plan) if old_plan is not None else 0.0
+                ws.cell(row=r, column=c_payment_plan, value=plan_base + n_total_sum)
+                rows_written += 1
+                continue
+
             row_method = _cell_text_normalized(ws.cell(row=r, column=c_method).value)
             due_cell = ws.cell(row=r, column=c_due).value
 
@@ -1359,7 +1647,7 @@ def run_smart_schedule_on_total_sheet(
         priority2_total = _sum_payment_plan_by_priority(
             ws, header_row, c_payment_plan, c_priority, max_r, 2
         )
-        wb.save(path)
+        _save_workbook_to_path(wb, path)
     finally:
         wb.close()
 
