@@ -27,13 +27,11 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
-      # PyInstaller打包核心（根据你的资源自行增删--add-data）
+      # PyInstaller打包核心（移除不存在的assets、config目录配置）
       - name: 编译Windows EXE程序
         run: |
           pyinstaller -F -w `
-            --add-data "assets;assets" `
-            --add-data "config;config" `
-            --name "AutoPaymentSchedule自动排班程序" `
+            --name "AutoPaymentSchedule自动排款程序" `
             main.py
 
       # 上传打包产物，可在线下载
@@ -49,5 +47,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.exe
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
