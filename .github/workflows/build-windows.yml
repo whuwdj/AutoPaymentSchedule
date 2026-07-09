@@ -29,11 +29,12 @@ jobs:
           pip install -r requirements.txt
 
       # PyInstaller打包：-w 隐藏黑窗，--icon 设置EXE图标，--add-data 打包图片资源
+      # 注意：--name 使用纯 ASCII 避免 Windows 文件名乱码
       - name: 编译Windows EXE程序
         run: |
           pyinstaller -F -w `
             --icon app.ico `
-            --name "AutoPaymentSchedule自动排款程序" `
+            --name "AutoPaymentSchedule" `
             --add-data "AutoPay.jpeg;." `
             main.py
 

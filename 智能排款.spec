@@ -62,6 +62,7 @@ if sys.platform == "darwin":
     )
 else:
     # Windows/Linux: 生成目录模式，带独立图标
+    # Windows 下 EXE 名称使用纯 ASCII，避免文件名乱码
     icon_file = "app.ico" if os.path.exists("app.ico") else None
     exe = EXE(
         pyz,
@@ -70,7 +71,7 @@ else:
         a.zipfiles,
         a.datas,
         [],
-        name="智能排款",
+        name="AutoPaymentSchedule",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
