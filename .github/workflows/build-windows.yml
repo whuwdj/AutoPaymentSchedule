@@ -1,0 +1,53 @@
+name: AutoPaymentSchedule 自动打包Windows EXE
+# 触发条件：推送v开头tag / 页面手动运行
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      # 拉取完整代码
+      - name: 检出项目代码
+        uses: actions/checkout@v4
+
+      # 固定Python3.11
+      - name: 配置Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # 更新pip + 安装打包工具 + 项目全部依赖
+      - name: 安装项目依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      # PyInstaller打包核心（根据你的资源自行增删--add-data）
+      - name: 编译Windows EXE程序
+        run: |
+          pyinstaller -F -w `
+            --add-data "assets;assets" `
+            --add-data "config;config" `
+            --name "AutoPaymentSchedule自动排班程序" `
+            main.py
+
+      # 上传打包产物，可在线下载
+      - name: 上传打包EXE文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-AutoPaymentSchedule-EXE
+          path: dist/*.exe
+          retention-days: 30
+
+      # 自动创建Release并挂载exe安装包
+      - name: 发布版本到Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
