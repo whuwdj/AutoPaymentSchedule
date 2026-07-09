@@ -127,12 +127,25 @@ def _app_dir() -> str:
 
 
 def _load_window_icon() -> QIcon:
-    """加载窗口图标，按优先级尝试多种格式。"""
-    base = _app_dir()
-    for name in ("app.ico", "app.icns", "app_icon.png", "AutoPay.jpeg"):
-        path = os.path.join(base, name)
-        if os.path.isfile(path):
-            return QIcon(path)
+    """加载窗口图标，按优先级尝试多种格式。
+
+    源码运行：从脚本目录读取。
+    PyInstaller 打包：优先读 sys._MEIPASS（--add-data 解压目录），回退到 EXE 同级目录。
+    """
+    search_dirs: list[str] = []
+
+    # PyInstaller 单文件打包：--add-data 解压到 sys._MEIPASS
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        search_dirs.append(sys._MEIPASS)  # type: ignore[attr-defined]
+
+    # 源码运行 / 打包后 EXE 同级目录
+    search_dirs.append(_app_dir())
+
+    for base in search_dirs:
+        for name in ("app.ico", "app.icns", "app_icon.png", "AutoPay.jpeg"):
+            path = os.path.join(base, name)
+            if os.path.isfile(path):
+                return QIcon(path)
     return QIcon()
 
 
