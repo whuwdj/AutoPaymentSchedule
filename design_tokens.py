@@ -17,9 +17,9 @@ class Figma:
     BG_PAGE = "#FFFFFF"
 
     CARD_BORDER = "#E8E8E8"
-    CARD_RADIUS = 8
-    CARD_PAD_H = 16
-    CARD_PAD_V = 16
+    CARD_RADIUS = 6
+    CARD_PAD_H = 12
+    CARD_PAD_V = 12
 
     LABEL_PURPLE = "#722ED1"
     # 金额数字及相邻「元」等资金展示（与标签紫色区分）
@@ -49,28 +49,28 @@ class Figma:
     RADIUS_INPUT = 4
     RADIUS_BUTTON = 4
 
-    PAGE_MARGIN_H = 20
-    PAGE_MARGIN_V = 20
-    GAP_SECTION = 24
-    GAP_INLINE = 12
-    GAP_TIGHT = 8
+    PAGE_MARGIN_H = 14
+    PAGE_MARGIN_V = 14
+    GAP_SECTION = 16
+    GAP_INLINE = 10
+    GAP_TIGHT = 6
 
-    ROW_GAP = 16
-    DATA_ROW_GAP = 60
+    ROW_GAP = 12
+    DATA_ROW_GAP = 48
     DATA_LABEL_TO_YUAN = 120
 
-    BODY_PT = 16
-    UPLOAD_BTN_PT = BODY_PT + 2
-    LABEL_PT = 18
-    ACTION_BTN_PT = 20
-    MICRO_PT = 12
+    BODY_PT = 12
+    UPLOAD_BTN_PT = BODY_PT + 1
+    LABEL_PT = 13
+    ACTION_BTN_PT = 14
+    MICRO_PT = 10
 
     LABEL_PURPLE_PX = LABEL_PT
     SECTION_TITLE_PT = LABEL_PT
 
-    W_PCT_INPUT = 100
+    W_PCT_INPUT = 80
     # 百分比行「输入框 + 间距 + %」占位宽度，总额行「元」同列右对齐
-    W_PCT_SUFFIX_SLOT = 18
+    W_PCT_SUFFIX_SLOT = 16
     W_PCT_TAIL = W_PCT_INPUT + GAP_TIGHT + W_PCT_SUFFIX_SLOT
     W_INPUT_SHORT_MAX = 100
     W_AMOUNT_INPUT = 200

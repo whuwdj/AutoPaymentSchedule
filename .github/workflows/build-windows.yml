@@ -28,11 +28,13 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
-      # PyInstaller打包核心（移除不存在的assets、config目录配置）
+      # PyInstaller打包：-w 隐藏黑窗，--icon 设置EXE图标，--add-data 打包图片资源
       - name: 编译Windows EXE程序
         run: |
           pyinstaller -F -w `
+            --icon app.ico `
             --name "AutoPaymentSchedule自动排款程序" `
+            --add-data "AutoPay.jpeg;." `
             main.py
 
       # 上传打包产物，可在线下载

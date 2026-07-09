@@ -127,9 +127,12 @@ def _app_dir() -> str:
 
 
 def _load_window_icon() -> QIcon:
-    ico = os.path.join(_app_dir(), "app.ico")
-    if os.path.isfile(ico):
-        return QIcon(ico)
+    """加载窗口图标，按优先级尝试多种格式。"""
+    base = _app_dir()
+    for name in ("app.ico", "app.icns", "app_icon.png", "AutoPay.jpeg"):
+        path = os.path.join(base, name)
+        if os.path.isfile(path):
+            return QIcon(path)
     return QIcon()
 
 
@@ -481,7 +484,8 @@ class MainWindow(QWidget):
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("智能排款")
-        self.setMinimumSize(900, 480)
+        self.setMinimumSize(820, 400)
+        self.resize(960, 540)
         self.setWindowIcon(_load_window_icon())
 
         m = Figma
@@ -791,7 +795,7 @@ class MainWindow(QWidget):
         card1_row.addStretch(1)
         self.btn_smart = QPushButton("智能排款")
         self.btn_smart.setObjectName("figmaBlue")
-        self.btn_smart.setFixedWidth(100)
+        self.btn_smart.setFixedWidth(80)
         self.btn_smart.clicked.connect(self._on_smart_placeholder)
         card1_row.addWidget(self.btn_smart, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -939,7 +943,7 @@ class MainWindow(QWidget):
         lay_btn_col.addStretch(1)
         self.btn_view_schedule = QPushButton("查看排款")
         self.btn_view_schedule.setObjectName("figmaBlue")
-        self.btn_view_schedule.setFixedWidth(100)
+        self.btn_view_schedule.setFixedWidth(80)
         self.btn_view_schedule.clicked.connect(self._on_view_schedule_placeholder)
         lay_btn_col.addWidget(
             self.btn_view_schedule,
